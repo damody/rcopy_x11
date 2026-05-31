@@ -93,9 +93,9 @@ impl WlClipboard {
 #[async_trait]
 impl ClipboardBackend for WlClipboard {
     async fn read_supported(&self) -> Result<ClipboardPayload, ClipboardError> {
-        let text_plain = read_mime(&self.paste_command, "text/plain").await.ok();
-        let text_html = read_mime(&self.paste_command, "text/html").await.ok();
-        let image_png = read_bytes(&self.paste_command, "image/png").await.ok();
+        let text_plain = read_optional_mime(&self.paste_command, "text/plain").await?;
+        let text_html = read_optional_mime(&self.paste_command, "text/html").await?;
+        let image_png = read_optional_bytes(&self.paste_command, "image/png").await?;
 
         Ok(ClipboardPayload {
             text_plain,
@@ -105,20 +105,77 @@ impl ClipboardBackend for WlClipboard {
     }
 
     async fn write_payload(&self, payload: &ClipboardPayload) -> Result<(), ClipboardError> {
-        if let Some(html) = &payload.text_html {
-            write_mime(&self.copy_command, "text/html", html.as_bytes()).await?;
-        }
-        if let Some(image) = &payload.image_png {
-            write_mime(&self.copy_command, "image/png", image).await?;
-        }
-        if let Some(text) = &payload.text_plain {
-            write_mime(&self.copy_command, "text/plain", text.as_bytes()).await?;
+        if let Some(selection) = select_single_write_mime(payload) {
+            write_mime(&self.copy_command, selection.mime(), selection.bytes()).await?;
         }
         Ok(())
     }
 }
 
-async fn read_mime(command: impl AsRef<OsStr>, mime: &str) -> Result<String, ClipboardError> {
+enum ReadResult<T> {
+    Available(T),
+    Unsupported,
+}
+
+enum WriteMime<'a> {
+    ImagePng(&'a [u8]),
+    TextHtml(&'a str),
+    TextPlain(&'a str),
+}
+
+impl WriteMime<'_> {
+    fn mime(&self) -> &'static str {
+        match self {
+            Self::ImagePng(_) => "image/png",
+            Self::TextHtml(_) => "text/html",
+            Self::TextPlain(_) => "text/plain",
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::ImagePng(bytes) => bytes,
+            Self::TextHtml(text) | Self::TextPlain(text) => text.as_bytes(),
+        }
+    }
+}
+
+fn select_single_write_mime(payload: &ClipboardPayload) -> Option<WriteMime<'_>> {
+    // wl-copy accepts one advertised type per invocation. Until the backend grows
+    // real multi-MIME support, write exactly one best representation.
+    if let Some(image) = &payload.image_png {
+        Some(WriteMime::ImagePng(image))
+    } else if let Some(html) = &payload.text_html {
+        Some(WriteMime::TextHtml(html))
+    } else {
+        payload.text_plain.as_deref().map(WriteMime::TextPlain)
+    }
+}
+
+async fn read_optional_mime(
+    command: impl AsRef<OsStr>,
+    mime: &str,
+) -> Result<Option<String>, ClipboardError> {
+    match read_mime(command, mime).await? {
+        ReadResult::Available(text) => Ok(Some(text)),
+        ReadResult::Unsupported => Ok(None),
+    }
+}
+
+async fn read_optional_bytes(
+    command: impl AsRef<OsStr>,
+    mime: &str,
+) -> Result<Option<Vec<u8>>, ClipboardError> {
+    match read_bytes(command, mime).await? {
+        ReadResult::Available(bytes) => Ok(Some(bytes)),
+        ReadResult::Unsupported => Ok(None),
+    }
+}
+
+async fn read_mime(
+    command: impl AsRef<OsStr>,
+    mime: &str,
+) -> Result<ReadResult<String>, ClipboardError> {
     let output = Command::new(command)
         .args(["--no-newline", "--type", mime])
         .output()
@@ -126,16 +183,18 @@ async fn read_mime(command: impl AsRef<OsStr>, mime: &str) -> Result<String, Cli
         .map_err(|error| ClipboardError::Command(error.to_string()))?;
 
     if !output.status.success() {
-        return Err(ClipboardError::Command(format!(
-            "wl-paste failed for {mime}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+        return classify_wl_paste_failure(mime, &output);
     }
 
-    String::from_utf8(output.stdout).map_err(|error| ClipboardError::Command(error.to_string()))
+    String::from_utf8(output.stdout)
+        .map(ReadResult::Available)
+        .map_err(|error| ClipboardError::Command(error.to_string()))
 }
 
-async fn read_bytes(command: impl AsRef<OsStr>, mime: &str) -> Result<Vec<u8>, ClipboardError> {
+async fn read_bytes(
+    command: impl AsRef<OsStr>,
+    mime: &str,
+) -> Result<ReadResult<Vec<u8>>, ClipboardError> {
     let output = Command::new(command)
         .args(["--type", mime])
         .output()
@@ -143,13 +202,24 @@ async fn read_bytes(command: impl AsRef<OsStr>, mime: &str) -> Result<Vec<u8>, C
         .map_err(|error| ClipboardError::Command(error.to_string()))?;
 
     if !output.status.success() {
-        return Err(ClipboardError::Command(format!(
-            "wl-paste failed for {mime}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+        return classify_wl_paste_failure(mime, &output);
     }
 
-    Ok(output.stdout)
+    Ok(ReadResult::Available(output.stdout))
+}
+
+fn classify_wl_paste_failure<T>(
+    mime: &str,
+    output: &std::process::Output,
+) -> Result<ReadResult<T>, ClipboardError> {
+    if output.status.code() == Some(1) {
+        Ok(ReadResult::Unsupported)
+    } else {
+        Err(ClipboardError::Command(format!(
+            "wl-paste failed for {mime}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
 }
 
 async fn write_mime(
@@ -191,7 +261,10 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[tokio::test]
     async fn mock_clipboard_round_trips_payload() {
@@ -265,10 +338,125 @@ esac
 
         clipboard.write_payload(&payload).await.unwrap();
 
-        assert_eq!(
-            fs::read_to_string(log).unwrap(),
-            "--type text/html\n--type image/png\n--type text/plain\n"
+        assert_eq!(fs::read_to_string(log).unwrap(), "--type image/png\n");
+    }
+
+    #[tokio::test]
+    async fn wl_clipboard_write_prefers_html_when_image_is_absent() {
+        let temp = temp_dir();
+        let log = temp.join("copy.log");
+        let wl_paste = write_executable(&temp, "wl-paste", "#!/bin/sh\nexit 1\n");
+        let wl_copy = write_executable(
+            &temp,
+            "wl-copy",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncat >/dev/null\n",
+                shell_quote(&log)
+            ),
         );
+        let clipboard = WlClipboard::with_commands(
+            wl_paste.to_string_lossy().into_owned(),
+            wl_copy.to_string_lossy().into_owned(),
+        );
+        let payload = ClipboardPayload {
+            text_plain: Some("alpha".into()),
+            text_html: Some("<b>alpha</b>".into()),
+            image_png: None,
+        };
+
+        clipboard.write_payload(&payload).await.unwrap();
+
+        assert_eq!(fs::read_to_string(log).unwrap(), "--type text/html\n");
+    }
+
+    #[tokio::test]
+    async fn wl_clipboard_write_uses_plain_text_when_only_text_is_present() {
+        let temp = temp_dir();
+        let log = temp.join("copy.log");
+        let wl_paste = write_executable(&temp, "wl-paste", "#!/bin/sh\nexit 1\n");
+        let wl_copy = write_executable(
+            &temp,
+            "wl-copy",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncat >/dev/null\n",
+                shell_quote(&log)
+            ),
+        );
+        let clipboard = WlClipboard::with_commands(
+            wl_paste.to_string_lossy().into_owned(),
+            wl_copy.to_string_lossy().into_owned(),
+        );
+        let payload = ClipboardPayload {
+            text_plain: Some("alpha".into()),
+            text_html: None,
+            image_png: None,
+        };
+
+        clipboard.write_payload(&payload).await.unwrap();
+
+        assert_eq!(fs::read_to_string(log).unwrap(), "--type text/plain\n");
+    }
+
+    #[tokio::test]
+    async fn wl_clipboard_read_returns_error_when_command_cannot_spawn() {
+        let clipboard = WlClipboard::with_commands(
+            "rcopy-definitely-missing-wl-paste",
+            "rcopy-definitely-missing-wl-copy",
+        );
+
+        let error = clipboard.read_supported().await.unwrap_err();
+
+        assert!(matches!(error, ClipboardError::Command(_)));
+    }
+
+    #[tokio::test]
+    async fn wl_clipboard_read_leaves_unsupported_mimes_empty() {
+        let temp = temp_dir();
+        let wl_paste = write_executable(
+            &temp,
+            "wl-paste",
+            r#"#!/bin/sh
+if [ "$1" = "--no-newline" ]; then
+  mime="$3"
+else
+  mime="$2"
+fi
+case "$mime" in
+  text/plain) printf 'alpha' ;;
+  *) exit 1 ;;
+esac
+"#,
+        );
+        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
+        let clipboard = WlClipboard::with_commands(
+            wl_paste.to_string_lossy().into_owned(),
+            wl_copy.to_string_lossy().into_owned(),
+        );
+
+        let payload = clipboard.read_supported().await.unwrap();
+
+        assert_eq!(payload.text_plain.as_deref(), Some("alpha"));
+        assert_eq!(payload.text_html, None);
+        assert_eq!(payload.image_png, None);
+    }
+
+    #[tokio::test]
+    async fn wl_clipboard_read_returns_error_when_backend_fails_for_every_mime() {
+        let temp = temp_dir();
+        let wl_paste = write_executable(
+            &temp,
+            "wl-paste",
+            "#!/bin/sh\nprintf 'wayland unavailable\\n' >&2\nexit 2\n",
+        );
+        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
+        let clipboard = WlClipboard::with_commands(
+            wl_paste.to_string_lossy().into_owned(),
+            wl_copy.to_string_lossy().into_owned(),
+        );
+
+        let error = clipboard.read_supported().await.unwrap_err();
+
+        assert!(matches!(error, ClipboardError::Command(_)));
     }
 
     fn temp_dir() -> PathBuf {
@@ -276,7 +464,8 @@ esac
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("rcopy-integration-{id}"));
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("rcopy-integration-{id}-{counter}"));
         fs::create_dir(&path).unwrap();
         path
     }

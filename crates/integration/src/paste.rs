@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use std::ffi::OsStr;
+use std::io::ErrorKind;
 use thiserror::Error;
 use tokio::process::Command;
 
@@ -45,7 +46,12 @@ impl PasteBackend for WtypePasteBackend {
             .args(["-M", "ctrl", "-k", "v", "-m", "ctrl"])
             .status()
             .await
-            .map_err(|error| PasteError::Command(error.to_string()))?;
+            .map_err(|error| match error.kind() {
+                ErrorKind::NotFound | ErrorKind::PermissionDenied => {
+                    PasteError::Unavailable(error.to_string())
+                }
+                _ => PasteError::Command(error.to_string()),
+            })?;
 
         if status.success() {
             Ok(())
@@ -64,7 +70,10 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[tokio::test]
     async fn disabled_paste_backend_reports_not_available() {
@@ -90,12 +99,22 @@ mod tests {
         assert_eq!(fs::read_to_string(log).unwrap(), "-M ctrl -k v -m ctrl\n");
     }
 
+    #[tokio::test]
+    async fn wtype_paste_backend_reports_missing_command_as_unavailable() {
+        let paste = WtypePasteBackend::new("rcopy-definitely-missing-wtype");
+
+        let error = paste.paste().await.unwrap_err();
+
+        assert!(matches!(error, PasteError::Unavailable(_)));
+    }
+
     fn temp_dir() -> PathBuf {
         let id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("rcopy-integration-{id}"));
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("rcopy-integration-{id}-{counter}"));
         fs::create_dir(&path).unwrap();
         path
     }
