@@ -935,11 +935,15 @@ name = "rcopyd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "rcopy-core",
  "rcopy-integration",
  "rcopy-storage",
+ "serde",
  "serde_json",
+ "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
