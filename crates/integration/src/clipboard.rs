@@ -259,10 +259,12 @@ async fn write_mime(
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -472,9 +474,42 @@ esac
 
     fn write_executable(dir: &Path, name: &str, script: &str) -> PathBuf {
         let path = dir.join(name);
-        fs::write(&path, script).unwrap();
+        {
+            let mut file = fs::File::create(&path).unwrap();
+            file.write_all(script_with_probe(script).as_bytes())
+                .unwrap();
+            file.sync_all().unwrap();
+        }
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable_ready(&path);
         path
+    }
+
+    fn script_with_probe(script: &str) -> String {
+        let probe = "if [ \"${RCOPY_FIXTURE_PROBE:-}\" = \"1\" ]; then exit 0; fi\n";
+        if let Some(rest) = script.strip_prefix("#!") {
+            if let Some((shebang, body)) = rest.split_once('\n') {
+                return format!("#!{shebang}\n{probe}{body}");
+            }
+        }
+
+        format!("#!/bin/sh\n{probe}{script}")
+    }
+
+    fn wait_until_executable_ready(path: &Path) {
+        for attempt in 0..100 {
+            match std::process::Command::new(path)
+                .env("RCOPY_FIXTURE_PROBE", "1")
+                .status()
+            {
+                Ok(status) if status.success() => return,
+                Ok(status) => panic!("fixture executable probe failed with {status}"),
+                Err(error) if error.raw_os_error() == Some(26) && attempt < 99 => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("fixture executable probe failed: {error}"),
+            }
+        }
     }
 
     fn shell_quote(path: &Path) -> String {
