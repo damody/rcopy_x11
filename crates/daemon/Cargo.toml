@@ -1,0 +1,17 @@
+[package]
+name = "rcopyd"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "rcopyd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+rcopy-core = { path = "../core" }
+rcopy-integration = { path = "../integration" }
+rcopy-storage = { path = "../storage" }
+serde_json.workspace = true
+tokio.workspace = true

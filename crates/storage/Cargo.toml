@@ -1,0 +1,14 @@
+[package]
+name = "rcopy-storage"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+rcopy-core = { path = "../core" }
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
