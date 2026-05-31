@@ -6,9 +6,13 @@ pub enum MimeKind {
 }
 
 pub fn select_supported_mimes(offered: &[String]) -> Vec<MimeKind> {
-    let has_text = offered.iter().any(|mime| mime.starts_with("text/plain"));
-    let has_html = offered.iter().any(|mime| mime == "text/html");
-    let has_png = offered.iter().any(|mime| mime == "image/png");
+    let normalized = offered
+        .iter()
+        .map(|mime| normalize_mime(mime))
+        .collect::<Vec<_>>();
+    let has_text = normalized.iter().any(|mime| mime == "text/plain");
+    let has_html = normalized.iter().any(|mime| mime == "text/html");
+    let has_png = normalized.iter().any(|mime| mime == "image/png");
     let mut selected = Vec::new();
     if has_text {
         selected.push(MimeKind::TextPlain);
@@ -20,6 +24,14 @@ pub fn select_supported_mimes(offered: &[String]) -> Vec<MimeKind> {
         selected.push(MimeKind::ImagePng);
     }
     selected
+}
+
+fn normalize_mime(mime: &str) -> String {
+    let base = mime
+        .split_once(';')
+        .map_or(mime, |(base, _parameters)| base)
+        .trim();
+    base.to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -38,5 +50,26 @@ mod tests {
             select_supported_mimes(&offered),
             vec![MimeKind::TextPlain, MimeKind::TextHtml, MimeKind::ImagePng]
         );
+    }
+
+    #[test]
+    fn mime_matching_normalizes_case_whitespace_and_parameters() {
+        let offered = vec![
+            " TEXT/PLAIN ; charset=utf-8".to_string(),
+            "Text/Html; Charset=UTF-8".to_string(),
+            " IMAGE/PNG ".to_string(),
+        ];
+
+        assert_eq!(
+            select_supported_mimes(&offered),
+            vec![MimeKind::TextPlain, MimeKind::TextHtml, MimeKind::ImagePng]
+        );
+    }
+
+    #[test]
+    fn mime_matching_rejects_prefix_only_matches() {
+        let offered = vec!["text/plainfoo".to_string()];
+
+        assert_eq!(select_supported_mimes(&offered), Vec::new());
     }
 }
