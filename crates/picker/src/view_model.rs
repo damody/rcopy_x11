@@ -51,6 +51,15 @@ impl PickerModel {
         Some(removed)
     }
 
+    pub fn remove_by_id(&mut self, id: uuid::Uuid) -> Option<ClipboardItem> {
+        let index = self.items.iter().position(|item| item.id == id)?;
+        let removed = self.items.remove(index);
+        if self.selected_index >= self.items.len() {
+            self.selected_index = self.items.len().saturating_sub(1);
+        }
+        Some(removed)
+    }
+
     pub fn toggle_selected_pin(&mut self) {
         if let Some(item) = self.items.get_mut(self.selected_index) {
             item.is_pinned = !item.is_pinned;
@@ -60,6 +69,24 @@ impl PickerModel {
     pub fn toggle_selected_favorite(&mut self) {
         if let Some(item) = self.items.get_mut(self.selected_index) {
             item.is_favorite = !item.is_favorite;
+        }
+    }
+
+    pub fn set_pin_by_id(&mut self, id: uuid::Uuid, value: bool) -> bool {
+        if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+            item.is_pinned = value;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_favorite_by_id(&mut self, id: uuid::Uuid, value: bool) -> bool {
+        if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+            item.is_favorite = value;
+            true
+        } else {
+            false
         }
     }
 }
@@ -111,6 +138,35 @@ mod tests {
         let mut model = PickerModel::new(vec![item("a")]);
         model.toggle_selected_favorite();
         assert!(model.selected_item().unwrap().is_favorite);
+    }
+
+    #[test]
+    fn remove_by_id_updates_selection_without_selected_item() {
+        let first = item("a");
+        let second = item("b");
+        let second_id = second.id;
+        let mut model = PickerModel::new(vec![first, second]);
+        model.move_down();
+
+        let removed = model.remove_by_id(second_id).unwrap();
+
+        assert_eq!(removed.id, second_id);
+        assert_eq!(model.selected_index, 0);
+        assert_eq!(model.items.len(), 1);
+    }
+
+    #[test]
+    fn set_flags_by_id_updates_matching_item() {
+        let target = item("a");
+        let target_id = target.id;
+        let mut model = PickerModel::new(vec![target]);
+
+        assert!(model.set_pin_by_id(target_id, true));
+        assert!(model.set_favorite_by_id(target_id, true));
+
+        let item = model.selected_item().unwrap();
+        assert!(item.is_pinned);
+        assert!(item.is_favorite);
     }
 
     fn item(text: &str) -> ClipboardItem {

@@ -13,6 +13,8 @@ pub enum ServiceError {
     Storage(#[from] StorageError),
     #[error("clipboard error: {0}")]
     Clipboard(#[from] ClipboardError),
+    #[error("plain text payload unavailable: {0}")]
+    PlainTextUnavailable(Uuid),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,9 +50,22 @@ where
         &self,
         id: Uuid,
         auto_paste: bool,
+        plain_text_only: bool,
     ) -> Result<RestoreResponse, ServiceError> {
         let item = self.repo.get_item(id)?.ok_or(ServiceError::NotFound(id))?;
-        self.clipboard.write_payload(&item.payload).await?;
+        let payload = if plain_text_only {
+            if item.payload.text_plain.is_none() {
+                return Err(ServiceError::PlainTextUnavailable(id));
+            }
+            rcopy_core::ClipboardPayload {
+                text_plain: item.payload.text_plain.clone(),
+                text_html: None,
+                image_png: None,
+            }
+        } else {
+            item.payload.clone()
+        };
+        self.clipboard.write_payload(&payload).await?;
         if !self.repo.mark_used(id)? {
             return Err(ServiceError::NotFound(id));
         }
@@ -115,7 +130,7 @@ mod tests {
         });
         let service = DaemonService::new(repo, clipboard.clone(), DisabledPasteBackend);
 
-        let response = service.restore(item_id, true).await.unwrap();
+        let response = service.restore(item_id, true, false).await.unwrap();
 
         assert!(response.paste_attempted);
         assert!(!response.paste_succeeded);
@@ -140,9 +155,87 @@ mod tests {
         let service = DaemonService::new(repo, clipboard, DisabledPasteBackend);
 
         assert_eq!(service.search("").unwrap()[0].id, newer_id);
-        service.restore(older_id, false).await.unwrap();
+        service.restore(older_id, false, false).await.unwrap();
 
         assert_eq!(service.search("").unwrap()[0].id, older_id);
+    }
+
+    #[tokio::test]
+    async fn restore_plain_text_only_writes_only_plain_text() {
+        let repo = Repository::open_in_memory().unwrap();
+        let now = Utc::now();
+        let payload = ClipboardPayload {
+            text_plain: Some("alpha".to_string()),
+            text_html: Some("<b>alpha</b>".to_string()),
+            image_png: Some(vec![1, 2, 3]),
+        };
+        let item = ClipboardItem {
+            id: Uuid::new_v4(),
+            created_at: now,
+            last_used_at: now,
+            content_hash: content_hash(&payload),
+            mime_types: vec![
+                "text/plain".to_string(),
+                "text/html".to_string(),
+                "image/png".to_string(),
+            ],
+            payload,
+            is_pinned: false,
+            is_favorite: false,
+            deleted_at: None,
+        };
+        let item_id = repo.upsert_item(&item).unwrap();
+        let clipboard = MemoryClipboard::new(ClipboardPayload {
+            text_plain: None,
+            text_html: None,
+            image_png: None,
+        });
+        let service = DaemonService::new(repo, clipboard.clone(), DisabledPasteBackend);
+
+        service.restore(item_id, false, true).await.unwrap();
+
+        assert_eq!(
+            clipboard.last_written().unwrap(),
+            ClipboardPayload {
+                text_plain: Some("alpha".to_string()),
+                text_html: None,
+                image_png: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_plain_text_only_reports_missing_plain_text() {
+        let repo = Repository::open_in_memory().unwrap();
+        let now = Utc::now();
+        let payload = ClipboardPayload {
+            text_plain: None,
+            text_html: Some("<b>alpha</b>".to_string()),
+            image_png: None,
+        };
+        let item = ClipboardItem {
+            id: Uuid::new_v4(),
+            created_at: now,
+            last_used_at: now,
+            content_hash: content_hash(&payload),
+            mime_types: vec!["text/html".to_string()],
+            payload,
+            is_pinned: false,
+            is_favorite: false,
+            deleted_at: None,
+        };
+        let item_id = repo.upsert_item(&item).unwrap();
+        let clipboard = MemoryClipboard::new(ClipboardPayload {
+            text_plain: None,
+            text_html: None,
+            image_png: None,
+        });
+        let service = DaemonService::new(repo, clipboard, DisabledPasteBackend);
+
+        assert!(matches!(
+            service.restore(item_id, false, true).await,
+            Err(ServiceError::PlainTextUnavailable(id)) if id == item_id
+        ));
     }
 
     #[tokio::test]

@@ -10,11 +10,25 @@ use uuid::Uuid;
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum IpcRequest {
-    Search { query: String },
-    Restore { id: Uuid, auto_paste: bool },
-    Delete { id: Uuid },
-    Pin { id: Uuid, value: bool },
-    Favorite { id: Uuid, value: bool },
+    Search {
+        query: String,
+    },
+    Restore {
+        id: Uuid,
+        auto_paste: bool,
+        plain_text_only: bool,
+    },
+    Delete {
+        id: Uuid,
+    },
+    Pin {
+        id: Uuid,
+        value: bool,
+    },
+    Favorite {
+        id: Uuid,
+        value: bool,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -53,8 +67,18 @@ impl IpcClient {
         .await
     }
 
-    pub async fn restore(&self, id: Uuid, auto_paste: bool) -> Result<RestoreResponse> {
-        self.request(IpcRequest::Restore { id, auto_paste }).await
+    pub async fn restore(
+        &self,
+        id: Uuid,
+        auto_paste: bool,
+        plain_text_only: bool,
+    ) -> Result<RestoreResponse> {
+        self.request(IpcRequest::Restore {
+            id,
+            auto_paste,
+            plain_text_only,
+        })
+        .await
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<()> {
@@ -103,6 +127,26 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).unwrap(),
             serde_json::json!({"type": "Search", "query": "alpha"})
+        );
+    }
+
+    #[test]
+    fn restore_request_includes_plain_text_only_flag() {
+        let id = Uuid::new_v4();
+        let request = IpcRequest::Restore {
+            id,
+            auto_paste: true,
+            plain_text_only: true,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "type": "Restore",
+                "id": id,
+                "auto_paste": true,
+                "plain_text_only": true
+            })
         );
     }
 }

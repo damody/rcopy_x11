@@ -17,11 +17,26 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum IpcRequest {
-    Search { query: String },
-    Restore { id: Uuid, auto_paste: bool },
-    Delete { id: Uuid },
-    Pin { id: Uuid, value: bool },
-    Favorite { id: Uuid, value: bool },
+    Search {
+        query: String,
+    },
+    Restore {
+        id: Uuid,
+        auto_paste: bool,
+        #[serde(default)]
+        plain_text_only: bool,
+    },
+    Delete {
+        id: Uuid,
+    },
+    Pin {
+        id: Uuid,
+        value: bool,
+    },
+    Favorite {
+        id: Uuid,
+        value: bool,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -122,9 +137,11 @@ where
 {
     let response = match request {
         IpcRequest::Search { query } => serialize_service_result(service.search(&query))?,
-        IpcRequest::Restore { id, auto_paste } => {
-            serialize_service_result(service.restore(id, auto_paste).await)?
-        }
+        IpcRequest::Restore {
+            id,
+            auto_paste,
+            plain_text_only,
+        } => serialize_service_result(service.restore(id, auto_paste, plain_text_only).await)?,
         IpcRequest::Delete { id } => serialize_service_result(service.soft_delete(id))?,
         IpcRequest::Pin { id, value } => serialize_service_result(service.set_pinned(id, value))?,
         IpcRequest::Favorite { id, value } => {
@@ -149,9 +166,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn restore_request_deserializes_uuid_and_auto_paste() {
+    fn restore_request_deserializes_uuid_auto_paste_and_plain_text_only() {
         let id = uuid::Uuid::new_v4();
-        let json = format!(r#"{{"type":"Restore","id":"{id}","auto_paste":true}}"#);
+        let json =
+            format!(r#"{{"type":"Restore","id":"{id}","auto_paste":true,"plain_text_only":true}}"#);
 
         let request: IpcRequest = serde_json::from_str(&json).unwrap();
 
@@ -159,10 +177,27 @@ mod tests {
             IpcRequest::Restore {
                 id: parsed_id,
                 auto_paste,
+                plain_text_only,
             } => {
                 assert_eq!(parsed_id, id);
                 assert!(auto_paste);
+                assert!(plain_text_only);
             }
+            other => panic!("unexpected request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_request_defaults_plain_text_only_to_false() {
+        let id = uuid::Uuid::new_v4();
+        let json = format!(r#"{{"type":"Restore","id":"{id}","auto_paste":true}}"#);
+
+        let request: IpcRequest = serde_json::from_str(&json).unwrap();
+
+        match request {
+            IpcRequest::Restore {
+                plain_text_only, ..
+            } => assert!(!plain_text_only),
             other => panic!("unexpected request: {other:?}"),
         }
     }
