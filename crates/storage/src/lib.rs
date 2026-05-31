@@ -1,3 +1,3 @@
-pub fn crate_ready() -> bool {
-    true
-}
+pub mod repository;
+
+pub use repository::{Repository, StorageError};
