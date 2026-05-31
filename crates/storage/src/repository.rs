@@ -1,8 +1,11 @@
 use chrono::{DateTime, Utc};
 use rcopy_core::{rank_items, ClipboardItem, ClipboardPayload};
 use rusqlite::{params, Connection};
+use std::{path::Path, time::Duration};
 use thiserror::Error;
 use uuid::Uuid;
+
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -21,8 +24,10 @@ pub struct Repository {
 }
 
 impl Repository {
-    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, StorageError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let path = path.as_ref();
         let conn = Connection::open(path)?;
+        configure_connection(&conn, true)?;
         let repo = Self { conn };
         repo.migrate()?;
         Ok(repo)
@@ -30,6 +35,7 @@ impl Repository {
 
     pub fn open_in_memory() -> Result<Self, StorageError> {
         let conn = Connection::open_in_memory()?;
+        configure_connection(&conn, false)?;
         let repo = Self { conn };
         repo.migrate()?;
         Ok(repo)
@@ -58,9 +64,9 @@ impl Repository {
         Ok(())
     }
 
-    pub fn upsert_item(&self, item: &ClipboardItem) -> Result<(), StorageError> {
+    pub fn upsert_item(&self, item: &ClipboardItem) -> Result<Uuid, StorageError> {
         let mime_types = serde_json::to_string(&item.mime_types)?;
-        self.conn.execute(
+        let id = self.conn.query_row(
             "INSERT INTO clipboard_items
             (id, created_at, last_used_at, content_hash, mime_types, text_plain, text_html, image_png, is_pinned, is_favorite, deleted_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
@@ -70,7 +76,8 @@ impl Repository {
                 text_plain = excluded.text_plain,
                 text_html = excluded.text_html,
                 image_png = excluded.image_png,
-                deleted_at = NULL",
+                deleted_at = NULL
+            RETURNING id",
             params![
                 item.id.to_string(),
                 item.created_at.to_rfc3339(),
@@ -84,8 +91,9 @@ impl Repository {
                 item.is_favorite as i64,
                 item.deleted_at.map(|time| time.to_rfc3339()),
             ],
+            |row| row.get::<_, String>(0),
         )?;
-        Ok(())
+        Ok(Uuid::parse_str(&id)?)
     }
 
     pub fn get_item(&self, id: Uuid) -> Result<Option<ClipboardItem>, StorageError> {
@@ -138,6 +146,14 @@ impl Repository {
     }
 }
 
+fn configure_connection(conn: &Connection, file_backed: bool) -> Result<(), StorageError> {
+    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+    if file_backed {
+        conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+    }
+    Ok(())
+}
+
 fn row_to_item(row: &rusqlite::Row<'_>) -> Result<ClipboardItem, StorageError> {
     let id: String = row.get(0)?;
     let created_at: String = row.get(1)?;
@@ -179,9 +195,10 @@ mod tests {
         let repo = test_repo();
         let item = make_item("alpha");
 
-        repo.upsert_item(&item).unwrap();
+        let persisted_id = repo.upsert_item(&item).unwrap();
 
-        let fetched = repo.get_item(item.id).unwrap().unwrap();
+        let fetched = repo.get_item(persisted_id).unwrap().unwrap();
+        assert_eq!(persisted_id, item.id);
         assert_eq!(fetched.id, item.id);
         assert_eq!(fetched.payload.text_plain.as_deref(), Some("alpha"));
     }
@@ -193,12 +210,29 @@ mod tests {
         let mut second = first.clone();
         second.last_used_at = first.last_used_at + chrono::Duration::seconds(30);
 
-        repo.upsert_item(&first).unwrap();
-        repo.upsert_item(&second).unwrap();
+        let first_id = repo.upsert_item(&first).unwrap();
+        let second_id = repo.upsert_item(&second).unwrap();
 
         let items = repo.search("").unwrap();
+        let fetched = repo.get_item(second_id).unwrap().unwrap();
         assert_eq!(items.len(), 1);
+        assert_eq!(first_id, first.id);
+        assert_eq!(second_id, first.id);
+        assert_eq!(fetched.id, first.id);
         assert_eq!(items[0].last_used_at, second.last_used_at);
+    }
+
+    #[test]
+    fn file_backed_connections_have_busy_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::open(dir.path().join("clipboard.db")).unwrap();
+
+        let timeout_ms: i64 = repo
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+
+        assert!(timeout_ms >= 5_000);
     }
 
     #[test]
