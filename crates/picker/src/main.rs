@@ -1,3 +1,7 @@
+mod ipc_client;
+mod ui;
+mod view_model;
+
 fn main() {
-    println!("rcopy picker scaffold");
+    ui::run();
 }

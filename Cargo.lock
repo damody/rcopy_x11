@@ -909,12 +909,15 @@ name = "rcopy-picker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "glib",
  "gtk4",
  "libadwaita",
  "rcopy-core",
+ "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
