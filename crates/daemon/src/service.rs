@@ -51,6 +51,9 @@ where
     ) -> Result<RestoreResponse, ServiceError> {
         let item = self.repo.get_item(id)?.ok_or(ServiceError::NotFound(id))?;
         self.clipboard.write_payload(&item.payload).await?;
+        if !self.repo.mark_used(id)? {
+            return Err(ServiceError::NotFound(id));
+        }
 
         if !auto_paste {
             return Ok(RestoreResponse {
@@ -66,15 +69,27 @@ where
     }
 
     pub fn soft_delete(&self, id: Uuid) -> Result<(), ServiceError> {
-        Ok(self.repo.soft_delete(id)?)
+        if self.repo.soft_delete(id)? {
+            Ok(())
+        } else {
+            Err(ServiceError::NotFound(id))
+        }
     }
 
     pub fn set_pinned(&self, id: Uuid, value: bool) -> Result<(), ServiceError> {
-        Ok(self.repo.set_pinned(id, value)?)
+        if self.repo.set_pinned(id, value)? {
+            Ok(())
+        } else {
+            Err(ServiceError::NotFound(id))
+        }
     }
 
     pub fn set_favorite(&self, id: Uuid, value: bool) -> Result<(), ServiceError> {
-        Ok(self.repo.set_favorite(id, value)?)
+        if self.repo.set_favorite(id, value)? {
+            Ok(())
+        } else {
+            Err(ServiceError::NotFound(id))
+        }
     }
 }
 
@@ -111,6 +126,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_updates_last_used_at() {
+        let repo = Repository::open_in_memory().unwrap();
+        let older = make_service_item("older");
+        let newer = make_service_item("newer");
+        let older_id = repo.upsert_item(&older).unwrap();
+        let newer_id = repo.upsert_item(&newer).unwrap();
+        let clipboard = MemoryClipboard::new(ClipboardPayload {
+            text_plain: None,
+            text_html: None,
+            image_png: None,
+        });
+        let service = DaemonService::new(repo, clipboard, DisabledPasteBackend);
+
+        assert_eq!(service.search("").unwrap()[0].id, newer_id);
+        service.restore(older_id, false).await.unwrap();
+
+        assert_eq!(service.search("").unwrap()[0].id, older_id);
+    }
+
+    #[tokio::test]
     async fn service_deletes_pins_favorites_and_searches_items() {
         let repo = Repository::open_in_memory().unwrap();
         let item = make_service_item("alpha");
@@ -131,6 +166,31 @@ mod tests {
 
         service.soft_delete(item_id).unwrap();
         assert!(service.search("alpha").unwrap().is_empty());
+    }
+
+    #[test]
+    fn item_actions_report_not_found_for_missing_ids() {
+        let repo = Repository::open_in_memory().unwrap();
+        let clipboard = MemoryClipboard::new(ClipboardPayload {
+            text_plain: None,
+            text_html: None,
+            image_png: None,
+        });
+        let service = DaemonService::new(repo, clipboard, DisabledPasteBackend);
+        let missing = Uuid::new_v4();
+
+        assert!(matches!(
+            service.soft_delete(missing),
+            Err(ServiceError::NotFound(id)) if id == missing
+        ));
+        assert!(matches!(
+            service.set_pinned(missing, true),
+            Err(ServiceError::NotFound(id)) if id == missing
+        ));
+        assert!(matches!(
+            service.set_favorite(missing, true),
+            Err(ServiceError::NotFound(id)) if id == missing
+        ));
     }
 
     fn make_service_item(text: &str) -> ClipboardItem {

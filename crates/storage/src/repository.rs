@@ -121,28 +121,36 @@ impl Repository {
         Ok(rank_items(query, items))
     }
 
-    pub fn soft_delete(&self, id: Uuid) -> Result<(), StorageError> {
-        self.conn.execute(
+    pub fn soft_delete(&self, id: Uuid) -> Result<bool, StorageError> {
+        let affected = self.conn.execute(
             "UPDATE clipboard_items SET deleted_at = ?2 WHERE id = ?1",
             params![id.to_string(), Utc::now().to_rfc3339()],
         )?;
-        Ok(())
+        Ok(affected > 0)
     }
 
-    pub fn set_pinned(&self, id: Uuid, value: bool) -> Result<(), StorageError> {
-        self.conn.execute(
+    pub fn set_pinned(&self, id: Uuid, value: bool) -> Result<bool, StorageError> {
+        let affected = self.conn.execute(
             "UPDATE clipboard_items SET is_pinned = ?2 WHERE id = ?1",
             params![id.to_string(), value as i64],
         )?;
-        Ok(())
+        Ok(affected > 0)
     }
 
-    pub fn set_favorite(&self, id: Uuid, value: bool) -> Result<(), StorageError> {
-        self.conn.execute(
+    pub fn set_favorite(&self, id: Uuid, value: bool) -> Result<bool, StorageError> {
+        let affected = self.conn.execute(
             "UPDATE clipboard_items SET is_favorite = ?2 WHERE id = ?1",
             params![id.to_string(), value as i64],
         )?;
-        Ok(())
+        Ok(affected > 0)
+    }
+
+    pub fn mark_used(&self, id: Uuid) -> Result<bool, StorageError> {
+        let affected = self.conn.execute(
+            "UPDATE clipboard_items SET last_used_at = ?2 WHERE id = ?1",
+            params![id.to_string(), Utc::now().to_rfc3339()],
+        )?;
+        Ok(affected > 0)
     }
 }
 
@@ -243,7 +251,7 @@ mod tests {
         let item = make_item("alpha");
 
         repo.upsert_item(&item).unwrap();
-        repo.soft_delete(item.id).unwrap();
+        assert!(repo.soft_delete(item.id).unwrap());
 
         assert!(repo.search("alpha").unwrap().is_empty());
     }
@@ -254,12 +262,38 @@ mod tests {
         let item = make_item("alpha");
 
         repo.upsert_item(&item).unwrap();
-        repo.set_pinned(item.id, true).unwrap();
-        repo.set_favorite(item.id, true).unwrap();
+        assert!(repo.set_pinned(item.id, true).unwrap());
+        assert!(repo.set_favorite(item.id, true).unwrap());
 
         let fetched = repo.get_item(item.id).unwrap().unwrap();
         assert!(fetched.is_pinned);
         assert!(fetched.is_favorite);
+    }
+
+    #[test]
+    fn updates_report_missing_ids() {
+        let repo = test_repo();
+        let missing = Uuid::new_v4();
+
+        assert!(!repo.soft_delete(missing).unwrap());
+        assert!(!repo.set_pinned(missing, true).unwrap());
+        assert!(!repo.set_favorite(missing, true).unwrap());
+        assert!(!repo.mark_used(missing).unwrap());
+    }
+
+    #[test]
+    fn mark_used_moves_item_first_in_search_order() {
+        let repo = test_repo();
+        let older = make_item_at("older", Utc::now() - chrono::Duration::minutes(10));
+        let newer = make_item_at("newer", Utc::now());
+
+        repo.upsert_item(&older).unwrap();
+        repo.upsert_item(&newer).unwrap();
+        assert_eq!(repo.search("").unwrap()[0].id, newer.id);
+
+        assert!(repo.mark_used(older.id).unwrap());
+
+        assert_eq!(repo.search("").unwrap()[0].id, older.id);
     }
 
     fn test_repo() -> Repository {
@@ -267,7 +301,10 @@ mod tests {
     }
 
     fn make_item(text: &str) -> ClipboardItem {
-        let now = Utc::now();
+        make_item_at(text, Utc::now())
+    }
+
+    fn make_item_at(text: &str, now: chrono::DateTime<Utc>) -> ClipboardItem {
         let payload = ClipboardPayload {
             text_plain: Some(text.to_string()),
             text_html: None,

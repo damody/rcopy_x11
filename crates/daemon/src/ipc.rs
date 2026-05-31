@@ -1,11 +1,18 @@
 use anyhow::Result;
+use rcopy_core::default_socket_path;
 use rcopy_integration::{ClipboardBackend, PasteBackend};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::rc::Rc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::service::DaemonService;
+use crate::service::{DaemonService, ServiceError};
+
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -26,20 +33,61 @@ pub enum IpcResponse<T> {
 
 pub async fn serve_default_socket<C, P>(service: DaemonService<C, P>) -> Result<()>
 where
-    C: ClipboardBackend,
-    P: PasteBackend,
+    C: ClipboardBackend + 'static,
+    P: PasteBackend + 'static,
 {
-    let path = "/tmp/rcopyd.sock";
-    let _ = std::fs::remove_file(path);
+    let path = default_socket_path();
+    prepare_socket_path(&path)?;
     let listener = UnixListener::bind(path)?;
+    let service = Rc::new(Mutex::new(service));
 
-    loop {
-        let (stream, _) = listener.accept().await?;
-        handle_client(stream, &service).await?;
-    }
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            loop {
+                let (stream, _) = listener.accept().await?;
+                let service = Rc::clone(&service);
+                tokio::task::spawn_local(async move {
+                    if let Err(error) = handle_client(stream, service).await {
+                        eprintln!("IPC client error: {error}");
+                    }
+                });
+            }
+        })
+        .await
 }
 
-async fn handle_client<C, P>(stream: UnixStream, service: &DaemonService<C, P>) -> Result<()>
+fn prepare_socket_path(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        create_private_dir(parent)?;
+    }
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            std::fs::remove_file(path)?;
+        }
+        Ok(_) => {
+            anyhow::bail!("refusing to remove non-socket IPC path: {}", path.display());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+async fn handle_client<C, P>(
+    stream: UnixStream,
+    service: Rc<Mutex<DaemonService<C, P>>>,
+) -> Result<()>
 where
     C: ClipboardBackend,
     P: PasteBackend,
@@ -49,7 +97,10 @@ where
     reader.read_line(&mut line).await?;
 
     let response = match serde_json::from_str::<IpcRequest>(&line) {
-        Ok(request) => dispatch_request(request, service).await,
+        Ok(request) => {
+            let service = service.lock().await;
+            dispatch_request(request, &service).await
+        }
         Err(error) => Ok(serde_json::to_string(&IpcResponse::<()>::Err {
             message: error.to_string(),
         })?),
@@ -70,27 +121,27 @@ where
     P: PasteBackend,
 {
     let response = match request {
-        IpcRequest::Search { query } => serde_json::to_string(&IpcResponse::Ok {
-            value: service.search(&query)?,
-        })?,
-        IpcRequest::Restore { id, auto_paste } => serde_json::to_string(&IpcResponse::Ok {
-            value: service.restore(id, auto_paste).await?,
-        })?,
-        IpcRequest::Delete { id } => {
-            service.soft_delete(id)?;
-            serde_json::to_string(&IpcResponse::Ok { value: () })?
+        IpcRequest::Search { query } => serialize_service_result(service.search(&query))?,
+        IpcRequest::Restore { id, auto_paste } => {
+            serialize_service_result(service.restore(id, auto_paste).await)?
         }
-        IpcRequest::Pin { id, value } => {
-            service.set_pinned(id, value)?;
-            serde_json::to_string(&IpcResponse::Ok { value: () })?
-        }
+        IpcRequest::Delete { id } => serialize_service_result(service.soft_delete(id))?,
+        IpcRequest::Pin { id, value } => serialize_service_result(service.set_pinned(id, value))?,
         IpcRequest::Favorite { id, value } => {
-            service.set_favorite(id, value)?;
-            serde_json::to_string(&IpcResponse::Ok { value: () })?
+            serialize_service_result(service.set_favorite(id, value))?
         }
     };
 
     Ok(response)
+}
+
+fn serialize_service_result<T: Serialize>(result: Result<T, ServiceError>) -> Result<String> {
+    match result {
+        Ok(value) => Ok(serde_json::to_string(&IpcResponse::Ok { value })?),
+        Err(error) => Ok(serde_json::to_string(&IpcResponse::<()>::Err {
+            message: error.to_string(),
+        })?),
+    }
 }
 
 #[cfg(test)]
@@ -114,5 +165,64 @@ mod tests {
             }
             other => panic!("unexpected request: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn dispatch_returns_json_error_for_service_errors() {
+        let repo = rcopy_storage::Repository::open_in_memory().unwrap();
+        let clipboard = rcopy_integration::MemoryClipboard::new(rcopy_core::ClipboardPayload {
+            text_plain: None,
+            text_html: None,
+            image_png: None,
+        });
+        let service = DaemonService::new(repo, clipboard, rcopy_integration::DisabledPasteBackend);
+        let missing = Uuid::new_v4();
+
+        let response = dispatch_request(IpcRequest::Delete { id: missing }, &service)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response).unwrap(),
+            serde_json::json!({
+                "type": "Err",
+                "message": format!("item not found: {missing}")
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_socket_path_rejects_regular_files() {
+        let dir = unique_temp_dir();
+        let socket_path = dir.join("rcopyd.sock");
+        std::fs::write(&socket_path, "not a socket").unwrap();
+
+        assert!(prepare_socket_path(&socket_path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&socket_path).unwrap(),
+            "not a socket"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_socket_path_removes_stale_socket_files() {
+        let dir = unique_temp_dir();
+        let socket_path = dir.join("rcopyd.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        drop(listener);
+
+        prepare_socket_path(&socket_path).unwrap();
+
+        assert!(!socket_path.exists());
+    }
+
+    fn unique_temp_dir() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "rcopyd-test-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        path
     }
 }
