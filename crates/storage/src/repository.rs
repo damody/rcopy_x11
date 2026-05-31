@@ -208,6 +208,7 @@ mod tests {
         let repo = test_repo();
         let first = make_item("alpha");
         let mut second = first.clone();
+        second.id = Uuid::new_v4();
         second.last_used_at = first.last_used_at + chrono::Duration::seconds(30);
 
         let first_id = repo.upsert_item(&first).unwrap();
@@ -218,6 +219,7 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(first_id, first.id);
         assert_eq!(second_id, first.id);
+        assert_ne!(second_id, second.id);
         assert_eq!(fetched.id, first.id);
         assert_eq!(items[0].last_used_at, second.last_used_at);
     }
