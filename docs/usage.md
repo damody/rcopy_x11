@@ -45,10 +45,10 @@ fallback is a user-scoped temp directory like `/tmp/rcopy-$UID/rcopyd.sock`.
 
 ## Hyprland Binding
 
-Add a binding like this to `hyprland.conf`:
+Add a Ctrl+backtick binding like this to `hyprland.conf`:
 
 ```text
-bind = SUPER, V, exec, cargo run --manifest-path /home/damody/work/rcopy/Cargo.toml -p rcopy-picker
+bind = CTRL, grave, exec, cargo run --manifest-path /home/damody/work/rcopy/Cargo.toml -p rcopy-picker
 ```
 
 Run `cargo run -p rcopyd` from the repo before using the binding. A session
