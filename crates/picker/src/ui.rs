@@ -7,8 +7,8 @@ use std::time::Duration;
 use gtk4::gdk;
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, Entry, EventControllerKey, Label,
-    ListBox, ListBoxRow, Orientation, PropagationPhase, ScrolledWindow,
+    Application, ApplicationWindow, Box as GtkBox, Entry, EventControllerKey, Label, ListBox,
+    ListBoxRow, Orientation, PropagationPhase, ScrolledWindow,
 };
 use libadwaita as adw;
 use rcopy_core::ClipboardItem;
@@ -43,9 +43,6 @@ struct UiContext {
     list: ListBox,
     status: Label,
     model: Rc<RefCell<PickerModel>>,
-    client: IpcClient,
-    runtime: Arc<Runtime>,
-    sender: Sender<UiMessage>,
 }
 
 pub fn run() {
@@ -108,9 +105,6 @@ fn build_ui(app: &Application) {
             list: list.clone(),
             status: status.clone(),
             model: model.clone(),
-            client: client.clone(),
-            runtime: runtime.clone(),
-            sender: sender.clone(),
         },
     );
     attach_search(&search, sender.clone(), client.clone(), runtime.clone());
@@ -184,24 +178,12 @@ fn attach_receiver(receiver: Receiver<UiMessage>, context: UiContext) {
                 UiMessage::SearchFinished(items) => {
                     context.status.set_text("");
                     context.model.borrow_mut().replace_items(items);
-                    render_items(
-                        &context.list,
-                        &context.model,
-                        &context.client,
-                        &context.runtime,
-                        &context.sender,
-                    );
+                    render_items(&context.list, &context.model);
                 }
                 UiMessage::SearchFailed(error) => {
                     context.status.set_text(&error);
                     context.model.borrow_mut().replace_items(Vec::new());
-                    render_items(
-                        &context.list,
-                        &context.model,
-                        &context.client,
-                        &context.runtime,
-                        &context.sender,
-                    );
+                    render_items(&context.list, &context.model);
                 }
                 UiMessage::RestoreFinished(Ok(response)) => {
                     if response.paste_attempted && !response.paste_succeeded {
@@ -218,13 +200,7 @@ fn attach_receiver(receiver: Receiver<UiMessage>, context: UiContext) {
                     Ok(()) => {
                         context.model.borrow_mut().remove_by_id(id);
                         context.status.set_text("");
-                        render_items(
-                            &context.list,
-                            &context.model,
-                            &context.client,
-                            &context.runtime,
-                            &context.sender,
-                        );
+                        render_items(&context.list, &context.model);
                     }
                     Err(error) => context.status.set_text(&format!("Delete failed: {error}")),
                 },
@@ -232,13 +208,7 @@ fn attach_receiver(receiver: Receiver<UiMessage>, context: UiContext) {
                     Ok(()) => {
                         context.model.borrow_mut().set_pin_by_id(id, value);
                         context.status.set_text("");
-                        render_items(
-                            &context.list,
-                            &context.model,
-                            &context.client,
-                            &context.runtime,
-                            &context.sender,
-                        );
+                        render_items(&context.list, &context.model);
                     }
                     Err(error) => context.status.set_text(&format!("Pin failed: {error}")),
                 },
@@ -246,13 +216,7 @@ fn attach_receiver(receiver: Receiver<UiMessage>, context: UiContext) {
                     Ok(()) => {
                         context.model.borrow_mut().set_favorite_by_id(id, value);
                         context.status.set_text("");
-                        render_items(
-                            &context.list,
-                            &context.model,
-                            &context.client,
-                            &context.runtime,
-                            &context.sender,
-                        );
+                        render_items(&context.list, &context.model);
                     }
                     Err(error) => context
                         .status
@@ -265,9 +229,10 @@ fn attach_receiver(receiver: Receiver<UiMessage>, context: UiContext) {
 }
 
 fn attach_selection_tracking(list: &ListBox, model: Rc<RefCell<PickerModel>>) {
-    list.connect_row_selected(move |_, row| {
+    list.connect_row_selected(move |list, row| {
         if let Some(row) = row {
             model.borrow_mut().select(row.index() as usize);
+            refresh_row_labels(list, &model);
         }
     });
 }
@@ -356,13 +321,7 @@ fn keyboard_controller(
     controller
 }
 
-fn render_items(
-    list: &ListBox,
-    model: &Rc<RefCell<PickerModel>>,
-    client: &IpcClient,
-    runtime: &Arc<Runtime>,
-    sender: &Sender<UiMessage>,
-) {
+fn render_items(list: &ListBox, model: &Rc<RefCell<PickerModel>>) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
@@ -378,66 +337,24 @@ fn render_items(
         return;
     }
 
-    for item in items {
-        list.append(&item_row(
-            item,
-            model.clone(),
-            client.clone(),
-            runtime.clone(),
-            sender.clone(),
-        ));
+    for (index, item) in items.into_iter().enumerate() {
+        list.append(&item_row(item, index == model.borrow().selected_index));
     }
 
     let selected_index = model.borrow().selected_index as i32;
     if let Some(row) = list.row_at_index(selected_index) {
         list.select_row(Some(&row));
     }
+    refresh_row_labels(list, model);
 }
 
-fn item_row(
-    item: ClipboardItem,
-    model: Rc<RefCell<PickerModel>>,
-    client: IpcClient,
-    runtime: Arc<Runtime>,
-    sender: Sender<UiMessage>,
-) -> ListBoxRow {
+fn item_row(item: ClipboardItem, expanded: bool) -> ListBoxRow {
     let row = ListBoxRow::new();
-    let container = GtkBox::new(Orientation::Horizontal, 8);
-    container.set_margin_top(8);
-    container.set_margin_bottom(8);
-    container.set_margin_start(8);
-    container.set_margin_end(8);
 
-    let label = item_label(&item);
+    let label = item_label(&item, expanded);
     label.set_hexpand(true);
-    container.append(&label);
 
-    let item_id = item.id;
-    let pin = Button::with_label(if item.is_pinned { "Unpin" } else { "Pin" });
-    let favorite = Button::with_label(if item.is_favorite {
-        "Unfavorite"
-    } else {
-        "Favorite"
-    });
-    container.append(&pin);
-    container.append(&favorite);
-
-    let pin_model = model.clone();
-    let pin_client = client.clone();
-    let pin_runtime = runtime.clone();
-    let pin_sender = sender.clone();
-    pin.connect_clicked(move |_| {
-        select_item_by_id(&pin_model, item_id);
-        toggle_pin_selected(&pin_model, &pin_client, &pin_runtime, &pin_sender);
-    });
-
-    let favorite_sender = sender.clone();
-    favorite.connect_clicked(move |_| {
-        select_item_by_id(&model, item_id);
-        toggle_favorite_selected(&model, &client, &runtime, &favorite_sender);
-    });
-
-    row.set_child(Some(&container));
+    row.set_child(Some(&label));
     row
 }
 
@@ -534,16 +451,6 @@ where
     });
 }
 
-fn select_item_by_id(model: &Rc<RefCell<PickerModel>>, id: Uuid) {
-    let index = model
-        .borrow()
-        .items
-        .iter()
-        .position(|item| item.id == id)
-        .unwrap_or(0);
-    model.borrow_mut().select(index);
-}
-
 fn select_previous(list: &ListBox, model: &Rc<RefCell<PickerModel>>) {
     model.borrow_mut().move_up();
     select_model_row(list, model);
@@ -560,13 +467,39 @@ fn select_model_row(list: &ListBox, model: &Rc<RefCell<PickerModel>>) {
     }
 }
 
+fn refresh_row_labels(list: &ListBox, model: &Rc<RefCell<PickerModel>>) {
+    let model = model.borrow();
+    for (index, item) in model.items.iter().enumerate() {
+        let Some(row) = list.row_at_index(index as i32) else {
+            continue;
+        };
+        let Some(label) = row.child().and_then(|child| child.downcast::<Label>().ok()) else {
+            continue;
+        };
+        configure_item_label(&label, item, index == model.selected_index);
+    }
+}
+
 pub fn preview_text(item: &ClipboardItem) -> String {
+    condense_text(&item_display_text(item))
+}
+
+fn condense_text(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(160)
+        .collect()
+}
+
+fn item_display_text(item: &ClipboardItem) -> String {
     if let Some(text) = &item.payload.text_plain {
-        return condense_text(&plain_text_preview(text));
+        return plain_text_preview(text);
     }
     if let Some(html) = &item.payload.text_html {
-        let text = condense_text(&strip_html_tags(html));
-        if text.is_empty() {
+        let text = strip_html_tags(html);
+        if text.trim().is_empty() {
             return "[HTML content]".to_string();
         }
         return text;
@@ -580,33 +513,17 @@ pub fn preview_text(item: &ClipboardItem) -> String {
     "[Unsupported content]".to_string()
 }
 
-fn content_kind(item: &ClipboardItem) -> &'static str {
-    if item.payload.image_png.is_some() {
-        "PNG"
-    } else if item.payload.text_html.is_some() {
-        "HTML"
-    } else if item.payload.text_plain.is_some() {
-        "Text"
+fn item_label_text(item: &ClipboardItem, expanded: bool) -> String {
+    if expanded {
+        let text = item_display_text(item);
+        truncate_chars(&text, 1000)
     } else {
-        "Unsupported"
+        preview_text(item)
     }
 }
 
-fn condensed_flags(item: &ClipboardItem) -> String {
-    format!(
-        "Pinned: {} | Favorite: {}",
-        if item.is_pinned { "yes" } else { "no" },
-        if item.is_favorite { "yes" } else { "no" }
-    )
-}
-
-fn condense_text(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(160)
-        .collect()
+fn truncate_chars(text: &str, limit: usize) -> String {
+    text.chars().take(limit).collect()
 }
 
 fn plain_text_preview(text: &str) -> String {
@@ -667,17 +584,26 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((width, height))
 }
 
-fn item_label(item: &ClipboardItem) -> Label {
-    let label = Label::new(Some(&format!(
-        "{} | Created: {} | {}\n{}",
-        content_kind(item),
-        item.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
-        condensed_flags(item),
-        preview_text(item)
-    )));
-    label.set_xalign(0.0);
-    label.set_wrap(true);
+fn item_label(item: &ClipboardItem, expanded: bool) -> Label {
+    let label = Label::new(None);
+    configure_item_label(&label, item, expanded);
     label
+}
+
+fn configure_item_label(label: &Label, item: &ClipboardItem, expanded: bool) {
+    label.set_text(&item_label_text(item, expanded));
+    label.set_xalign(0.0);
+    label.set_wrap(expanded);
+    label.set_lines(if expanded { 0 } else { 1 });
+    label.set_ellipsize(if expanded {
+        gtk4::pango::EllipsizeMode::None
+    } else {
+        gtk4::pango::EllipsizeMode::End
+    });
+    label.set_margin_top(6);
+    label.set_margin_bottom(6);
+    label.set_margin_start(8);
+    label.set_margin_end(8);
 }
 
 #[cfg(test)]
@@ -718,6 +644,31 @@ mod tests {
         });
 
         assert_eq!(preview_text(&item), "alpha beta");
+    }
+
+    #[test]
+    fn collapsed_item_label_contains_only_condensed_clipboard_text() {
+        let item = item_with_payload(rcopy_core::ClipboardPayload {
+            text_plain: Some("alpha\nbeta".into()),
+            text_html: None,
+            image_png: None,
+        });
+
+        assert_eq!(item_label_text(&item, false), "alpha beta");
+    }
+
+    #[test]
+    fn expanded_item_label_shows_content_capped_at_1000_characters() {
+        let item = item_with_payload(rcopy_core::ClipboardPayload {
+            text_plain: Some("x".repeat(1200)),
+            text_html: None,
+            image_png: None,
+        });
+
+        let text = item_label_text(&item, true);
+
+        assert_eq!(text.chars().count(), 1000);
+        assert!(text.chars().all(|character| character == 'x'));
     }
 
     #[test]
