@@ -13,6 +13,26 @@ RCOPY_HYPR_CONF="$HYPR_DIR/rcopy.conf"
 echo "Building rcopy binaries..."
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p rcopyd -p rcopy-picker
 
+if [ "${XDG_SESSION_TYPE:-}" != "wayland" ]; then
+    cat <<EOF
+
+Warning: this session is not Wayland.
+Current XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-unset}
+
+rcopy's clipboard backend uses wl-clipboard, so clipboard capture and paste need
+a Wayland session.
+EOF
+fi
+
+if ! command -v hyprctl >/dev/null 2>&1; then
+    cat <<EOF
+
+Warning: hyprctl was not found in PATH.
+The Hyprland binding file will be written, but this script cannot reload or
+verify Hyprland. If you are not logged into Hyprland, Ctrl+grave will not work.
+EOF
+fi
+
 mkdir -p "$SERVICE_DIR"
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -80,4 +100,9 @@ hyprctl reload
 Check daemon status with:
 
 systemctl --user status rcopyd.service
+
+Current session:
+
+XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-unset}
+XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-unset}
 EOF
