@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use rcopy_core::{select_supported_mimes, ClipboardPayload, MimeKind};
+use rcopy_core::{ClipboardPayload, MimeKind};
+use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -97,20 +98,25 @@ impl WlClipboard {
 impl ClipboardBackend for WlClipboard {
     async fn read_supported(&self) -> Result<ClipboardPayload, ClipboardError> {
         let offered = list_offered_mimes(&self.paste_command).await?;
-        let supported = select_supported_mimes(&offered);
 
-        let text_plain = if supported.contains(&MimeKind::TextPlain) {
-            read_optional_mime(&self.paste_command, "text/plain").await?
+        let text_plain = if let Some(mime) = offered_mime_for(&offered, MimeKind::TextPlain) {
+            read_optional_mime(&self.paste_command, mime)
+                .await?
+                .map(normalize_plain_text)
         } else {
             None
         };
-        let text_html = if supported.contains(&MimeKind::TextHtml) {
-            read_optional_mime(&self.paste_command, "text/html").await?
+        let text_html = if text_plain.is_none() {
+            if let Some(mime) = offered_mime_for(&offered, MimeKind::TextHtml) {
+                read_optional_mime(&self.paste_command, mime).await?
+            } else {
+                None
+            }
         } else {
             None
         };
-        let image_png = if supported.contains(&MimeKind::ImagePng) {
-            read_optional_bytes(&self.paste_command, "image/png").await?
+        let image_png = if let Some(mime) = offered_mime_for(&offered, MimeKind::ImagePng) {
+            read_optional_bytes(&self.paste_command, mime).await?
         } else {
             None
         };
@@ -128,6 +134,100 @@ impl ClipboardBackend for WlClipboard {
         }
         Ok(())
     }
+}
+
+fn offered_mime_for(offered: &[String], kind: MimeKind) -> Option<&str> {
+    let expected = match kind {
+        MimeKind::TextPlain => "text/plain",
+        MimeKind::TextHtml => "text/html",
+        MimeKind::ImagePng => "image/png",
+    };
+
+    offered
+        .iter()
+        .find(|mime| normalize_offered_mime(mime) == expected)
+        .map(String::as_str)
+}
+
+fn normalize_offered_mime(mime: &str) -> String {
+    mime.split_once(';')
+        .map_or(mime, |(base, _parameters)| base)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn normalize_plain_text(text: String) -> String {
+    normalize_plain_text_cow(&text).into_owned()
+}
+
+fn normalize_plain_text_cow(text: &str) -> Cow<'_, str> {
+    if !looks_like_html_document(text) {
+        return Cow::Borrowed(text);
+    }
+
+    let stripped = strip_html_document(text);
+    if stripped.is_empty() {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(stripped)
+    }
+}
+
+fn looks_like_html_document(text: &str) -> bool {
+    let trimmed = text.trim_start().to_ascii_lowercase();
+    trimmed.starts_with("<html")
+        || trimmed.starts_with("<!doctype html")
+        || trimmed.contains("<!--startfragment-->")
+}
+
+fn strip_html_document(html: &str) -> String {
+    let without_comments = strip_html_comments(html);
+    let mut text = String::new();
+    let mut in_tag = false;
+
+    for character in without_comments.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                text.push(' ');
+            }
+            _ if !in_tag => text.push(character),
+            _ => {}
+        }
+    }
+
+    decode_basic_html_entities(&text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn strip_html_comments(html: &str) -> String {
+    let mut output = String::new();
+    let mut remaining = html;
+
+    while let Some(start) = remaining.find("<!--") {
+        output.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 4..];
+        if let Some(end) = after_start.find("-->") {
+            remaining = &after_start[end + 3..];
+        } else {
+            return output;
+        }
+    }
+
+    output.push_str(remaining);
+    output
+}
+
+fn decode_basic_html_entities(text: &str) -> String {
+    text.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
 }
 
 async fn list_offered_mimes(command: impl AsRef<OsStr>) -> Result<Vec<String>, ClipboardError> {
@@ -160,7 +260,7 @@ enum ReadResult<T> {
 enum WriteMime<'a> {
     ImagePng(&'a [u8]),
     TextHtml(&'a str),
-    TextPlain(&'a str),
+    TextPlain(Cow<'a, str>),
 }
 
 impl WriteMime<'_> {
@@ -175,7 +275,8 @@ impl WriteMime<'_> {
     fn bytes(&self) -> &[u8] {
         match self {
             Self::ImagePng(bytes) => bytes,
-            Self::TextHtml(text) | Self::TextPlain(text) => text.as_bytes(),
+            Self::TextHtml(text) => text.as_bytes(),
+            Self::TextPlain(text) => text.as_bytes(),
         }
     }
 }
@@ -185,10 +286,10 @@ fn select_single_write_mime(payload: &ClipboardPayload) -> Option<WriteMime<'_>>
     // real multi-MIME support, write exactly one best representation.
     if let Some(image) = &payload.image_png {
         Some(WriteMime::ImagePng(image))
-    } else if let Some(html) = &payload.text_html {
-        Some(WriteMime::TextHtml(html))
+    } else if let Some(text) = &payload.text_plain {
+        Some(WriteMime::TextPlain(normalize_plain_text_cow(text)))
     } else {
-        payload.text_plain.as_deref().map(WriteMime::TextPlain)
+        payload.text_html.as_deref().map(WriteMime::TextHtml)
     }
 }
 
@@ -333,7 +434,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wl_clipboard_reads_supported_mimes_from_configured_command() {
+    async fn wl_clipboard_prefers_plain_text_over_html_when_both_are_available() {
         let temp = temp_dir();
         let wl_paste = write_executable(
             &temp,
@@ -365,8 +466,112 @@ esac
         let payload = clipboard.read_supported().await.unwrap();
 
         assert_eq!(payload.text_plain.as_deref(), Some("alpha"));
-        assert_eq!(payload.text_html.as_deref(), Some("<b>alpha</b>"));
+        assert_eq!(payload.text_html, None);
         assert_eq!(payload.image_png.as_deref(), Some(&[137, 80, 78, 71][..]));
+    }
+
+    #[tokio::test]
+    async fn wl_clipboard_reads_parameterized_plain_text_mime() {
+        let temp = temp_dir();
+        let wl_paste = write_executable(
+            &temp,
+            "wl-paste",
+            r#"#!/bin/sh
+if [ "$1" = "--list-types" ]; then
+  printf 'text/plain;charset=utf-8\ntext/html\n'
+  exit 0
+fi
+if [ "$1" = "--no-newline" ]; then
+  mime="$3"
+else
+  mime="$2"
+fi
+case "$mime" in
+  'text/plain;charset=utf-8') printf 'plain alpha' ;;
+  text/html) printf '<b>html alpha</b>' ;;
+  *) exit 1 ;;
+esac
+"#,
+        );
+        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
+        let clipboard = WlClipboard::with_commands(
+            wl_paste.to_string_lossy().into_owned(),
+            wl_copy.to_string_lossy().into_owned(),
+        );
+
+        let payload = clipboard.read_supported().await.unwrap();
+
+        assert_eq!(payload.text_plain.as_deref(), Some("plain alpha"));
+        assert_eq!(payload.text_html, None);
+        assert_eq!(payload.image_png, None);
+    }
+
+    #[tokio::test]
+    async fn wl_clipboard_strips_html_document_from_plain_text_payload() {
+        let temp = temp_dir();
+        let wl_paste = write_executable(
+            &temp,
+            "wl-paste",
+            r#"#!/bin/sh
+if [ "$1" = "--list-types" ]; then
+  printf 'text/plain;charset=utf-8\n'
+  exit 0
+fi
+if [ "$1" = "--no-newline" ] && [ "$3" = "text/plain;charset=utf-8" ]; then
+  printf '<html><body><!--StartFragment--><pre><div><span>  現在 `Ctrl+`` 的行為是：</span></div></pre><!--EndFragment--></body></html>'
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
+        let clipboard = WlClipboard::with_commands(
+            wl_paste.to_string_lossy().into_owned(),
+            wl_copy.to_string_lossy().into_owned(),
+        );
+
+        let payload = clipboard.read_supported().await.unwrap();
+
+        assert_eq!(
+            payload.text_plain.as_deref(),
+            Some("現在 `Ctrl+`` 的行為是：")
+        );
+        assert_eq!(payload.text_html, None);
+    }
+
+    #[tokio::test]
+    async fn wl_clipboard_reads_html_when_plain_text_is_unavailable() {
+        let temp = temp_dir();
+        let wl_paste = write_executable(
+            &temp,
+            "wl-paste",
+            r#"#!/bin/sh
+if [ "$1" = "--list-types" ]; then
+  printf 'text/html\n'
+  exit 0
+fi
+if [ "$1" = "--no-newline" ]; then
+  mime="$3"
+else
+  mime="$2"
+fi
+case "$mime" in
+  text/html) printf '<b>alpha</b>' ;;
+  *) exit 1 ;;
+esac
+"#,
+        );
+        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
+        let clipboard = WlClipboard::with_commands(
+            wl_paste.to_string_lossy().into_owned(),
+            wl_copy.to_string_lossy().into_owned(),
+        );
+
+        let payload = clipboard.read_supported().await.unwrap();
+
+        assert_eq!(payload.text_plain, None);
+        assert_eq!(payload.text_html.as_deref(), Some("<b>alpha</b>"));
+        assert_eq!(payload.image_png, None);
     }
 
     #[tokio::test]
@@ -398,7 +603,7 @@ esac
     }
 
     #[tokio::test]
-    async fn wl_clipboard_write_prefers_html_when_image_is_absent() {
+    async fn wl_clipboard_write_prefers_plain_text_over_html_when_both_are_present() {
         let temp = temp_dir();
         let log = temp.join("copy.log");
         let wl_paste = write_executable(&temp, "wl-paste", "#!/bin/sh\nexit 1\n");
@@ -416,6 +621,34 @@ esac
         );
         let payload = ClipboardPayload {
             text_plain: Some("alpha".into()),
+            text_html: Some("<b>alpha</b>".into()),
+            image_png: None,
+        };
+
+        clipboard.write_payload(&payload).await.unwrap();
+
+        assert_eq!(fs::read_to_string(log).unwrap(), "--type text/plain\n");
+    }
+
+    #[tokio::test]
+    async fn wl_clipboard_write_uses_html_when_plain_text_is_absent() {
+        let temp = temp_dir();
+        let log = temp.join("copy.log");
+        let wl_paste = write_executable(&temp, "wl-paste", "#!/bin/sh\nexit 1\n");
+        let wl_copy = write_executable(
+            &temp,
+            "wl-copy",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncat >/dev/null\n",
+                shell_quote(&log)
+            ),
+        );
+        let clipboard = WlClipboard::with_commands(
+            wl_paste.to_string_lossy().into_owned(),
+            wl_copy.to_string_lossy().into_owned(),
+        );
+        let payload = ClipboardPayload {
+            text_plain: None,
             text_html: Some("<b>alpha</b>".into()),
             image_png: None,
         };
@@ -451,6 +684,37 @@ esac
         clipboard.write_payload(&payload).await.unwrap();
 
         assert_eq!(fs::read_to_string(log).unwrap(), "--type text/plain\n");
+    }
+
+    #[tokio::test]
+    async fn wl_clipboard_write_strips_html_document_from_plain_text_payload() {
+        let temp = temp_dir();
+        let output = temp.join("copy.out");
+        let wl_paste = write_executable(&temp, "wl-paste", "#!/bin/sh\nexit 1\n");
+        let wl_copy = write_executable(
+            &temp,
+            "wl-copy",
+            &format!("#!/bin/sh\ncat > {}\n", shell_quote(&output)),
+        );
+        let clipboard = WlClipboard::with_commands(
+            wl_paste.to_string_lossy().into_owned(),
+            wl_copy.to_string_lossy().into_owned(),
+        );
+        let payload = ClipboardPayload {
+            text_plain: Some(
+                "<html><body><!--StartFragment--><span>現在 `Ctrl+`` 的行為是：</span></body></html>"
+                    .into(),
+            ),
+            text_html: None,
+            image_png: None,
+        };
+
+        clipboard.write_payload(&payload).await.unwrap();
+
+        assert_eq!(
+            fs::read_to_string(output).unwrap(),
+            "現在 `Ctrl+`` 的行為是："
+        );
     }
 
     #[tokio::test]

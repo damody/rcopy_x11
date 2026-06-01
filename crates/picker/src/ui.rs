@@ -562,7 +562,7 @@ fn select_model_row(list: &ListBox, model: &Rc<RefCell<PickerModel>>) {
 
 pub fn preview_text(item: &ClipboardItem) -> String {
     if let Some(text) = &item.payload.text_plain {
-        return condense_text(text);
+        return condense_text(&plain_text_preview(text));
     }
     if let Some(html) = &item.payload.text_html {
         let text = condense_text(&strip_html_tags(html));
@@ -607,6 +607,39 @@ fn condense_text(text: &str) -> String {
         .chars()
         .take(160)
         .collect()
+}
+
+fn plain_text_preview(text: &str) -> String {
+    if looks_like_html_document(text) {
+        strip_html_tags(&strip_html_comments(text))
+    } else {
+        text.to_string()
+    }
+}
+
+fn looks_like_html_document(text: &str) -> bool {
+    let trimmed = text.trim_start().to_ascii_lowercase();
+    trimmed.starts_with("<html")
+        || trimmed.starts_with("<!doctype html")
+        || trimmed.contains("<!--startfragment-->")
+}
+
+fn strip_html_comments(html: &str) -> String {
+    let mut output = String::new();
+    let mut remaining = html;
+
+    while let Some(start) = remaining.find("<!--") {
+        output.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 4..];
+        if let Some(end) = after_start.find("-->") {
+            remaining = &after_start[end + 3..];
+        } else {
+            return output;
+        }
+    }
+
+    output.push_str(remaining);
+    output
 }
 
 fn strip_html_tags(html: &str) -> String {
@@ -660,6 +693,20 @@ mod tests {
         });
 
         assert_eq!(preview_text(&item), "alpha beta");
+    }
+
+    #[test]
+    fn preview_text_strips_html_document_from_plain_text() {
+        let item = item_with_payload(rcopy_core::ClipboardPayload {
+            text_plain: Some(
+                "<html><body><!--StartFragment--><span>現在 `Ctrl+`` 的行為是：</span></body></html>"
+                    .into(),
+            ),
+            text_html: None,
+            image_png: None,
+        });
+
+        assert_eq!(preview_text(&item), "現在 `Ctrl+`` 的行為是：");
     }
 
     #[test]
