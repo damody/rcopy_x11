@@ -1,11 +1,14 @@
 use async_trait::async_trait;
-use rcopy_core::ClipboardPayload;
+use rcopy_core::{select_supported_mimes, ClipboardPayload, MimeKind};
 use std::ffi::OsStr;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::time::{timeout, Duration};
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Error)]
 pub enum ClipboardError {
@@ -93,9 +96,24 @@ impl WlClipboard {
 #[async_trait]
 impl ClipboardBackend for WlClipboard {
     async fn read_supported(&self) -> Result<ClipboardPayload, ClipboardError> {
-        let text_plain = read_optional_mime(&self.paste_command, "text/plain").await?;
-        let text_html = read_optional_mime(&self.paste_command, "text/html").await?;
-        let image_png = read_optional_bytes(&self.paste_command, "image/png").await?;
+        let offered = list_offered_mimes(&self.paste_command).await?;
+        let supported = select_supported_mimes(&offered);
+
+        let text_plain = if supported.contains(&MimeKind::TextPlain) {
+            read_optional_mime(&self.paste_command, "text/plain").await?
+        } else {
+            None
+        };
+        let text_html = if supported.contains(&MimeKind::TextHtml) {
+            read_optional_mime(&self.paste_command, "text/html").await?
+        } else {
+            None
+        };
+        let image_png = if supported.contains(&MimeKind::ImagePng) {
+            read_optional_bytes(&self.paste_command, "image/png").await?
+        } else {
+            None
+        };
 
         Ok(ClipboardPayload {
             text_plain,
@@ -110,6 +128,28 @@ impl ClipboardBackend for WlClipboard {
         }
         Ok(())
     }
+}
+
+async fn list_offered_mimes(command: impl AsRef<OsStr>) -> Result<Vec<String>, ClipboardError> {
+    let output = command_output(
+        Command::new(command).args(["--list-types"]),
+        "wl-paste --list-types",
+    )
+    .await?;
+
+    if !output.status.success() {
+        return Err(ClipboardError::Command(format!(
+            "wl-paste --list-types failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 enum ReadResult<T> {
@@ -176,11 +216,11 @@ async fn read_mime(
     command: impl AsRef<OsStr>,
     mime: &str,
 ) -> Result<ReadResult<String>, ClipboardError> {
-    let output = Command::new(command)
-        .args(["--no-newline", "--type", mime])
-        .output()
-        .await
-        .map_err(|error| ClipboardError::Command(error.to_string()))?;
+    let output = command_output(
+        Command::new(command).args(["--no-newline", "--type", mime]),
+        &format!("wl-paste --type {mime}"),
+    )
+    .await?;
 
     if !output.status.success() {
         return classify_wl_paste_failure(mime, &output);
@@ -195,17 +235,27 @@ async fn read_bytes(
     command: impl AsRef<OsStr>,
     mime: &str,
 ) -> Result<ReadResult<Vec<u8>>, ClipboardError> {
-    let output = Command::new(command)
-        .args(["--type", mime])
-        .output()
-        .await
-        .map_err(|error| ClipboardError::Command(error.to_string()))?;
+    let output = command_output(
+        Command::new(command).args(["--type", mime]),
+        &format!("wl-paste --type {mime}"),
+    )
+    .await?;
 
     if !output.status.success() {
         return classify_wl_paste_failure(mime, &output);
     }
 
     Ok(ReadResult::Available(output.stdout))
+}
+
+async fn command_output(
+    command: &mut Command,
+    description: &str,
+) -> Result<std::process::Output, ClipboardError> {
+    timeout(COMMAND_TIMEOUT, command.output())
+        .await
+        .map_err(|_| ClipboardError::Command(format!("{description} timed out")))?
+        .map_err(|error| ClipboardError::Command(error.to_string()))
 }
 
 fn classify_wl_paste_failure<T>(
@@ -289,6 +339,10 @@ mod tests {
             &temp,
             "wl-paste",
             r#"#!/bin/sh
+if [ "$1" = "--list-types" ]; then
+  printf 'text/plain\ntext/html\nimage/png\n'
+  exit 0
+fi
 if [ "$1" = "--no-newline" ]; then
   mime="$3"
 else
@@ -418,6 +472,10 @@ esac
             &temp,
             "wl-paste",
             r#"#!/bin/sh
+if [ "$1" = "--list-types" ]; then
+  printf 'text/plain\n'
+  exit 0
+fi
 if [ "$1" = "--no-newline" ]; then
   mime="$3"
 else
@@ -459,6 +517,40 @@ esac
         let error = clipboard.read_supported().await.unwrap_err();
 
         assert!(matches!(error, ClipboardError::Command(_)));
+    }
+
+    #[tokio::test]
+    async fn wl_clipboard_does_not_read_unoffered_image_mime() {
+        let temp = temp_dir();
+        let wl_paste = write_executable(
+            &temp,
+            "wl-paste",
+            r#"#!/bin/sh
+if [ "$1" = "--list-types" ]; then
+  printf 'text/plain\n'
+  exit 0
+fi
+if [ "$1" = "--no-newline" ] && [ "$3" = "text/plain" ]; then
+  printf 'alpha'
+  exit 0
+fi
+if [ "$2" = "image/png" ]; then
+  printf 'image/png should not be read\n' >&2
+  exit 9
+fi
+exit 1
+"#,
+        );
+        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
+        let clipboard = WlClipboard::with_commands(
+            wl_paste.to_string_lossy().into_owned(),
+            wl_copy.to_string_lossy().into_owned(),
+        );
+
+        let payload = clipboard.read_supported().await.unwrap();
+
+        assert_eq!(payload.text_plain.as_deref(), Some("alpha"));
+        assert_eq!(payload.image_png, None);
     }
 
     fn temp_dir() -> PathBuf {

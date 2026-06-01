@@ -84,29 +84,22 @@ fi
 
 if command -v gsettings >/dev/null 2>&1; then
     GNOME_KEY_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/rcopy/"
-    GNOME_ALT_KEY_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/rcopy-alt/"
     GNOME_SCHEMA="org.gnome.settings-daemon.plugins.media-keys"
     GNOME_CUSTOM_SCHEMA="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$GNOME_KEY_PATH"
-    GNOME_ALT_CUSTOM_SCHEMA="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$GNOME_ALT_KEY_PATH"
     CURRENT_BINDINGS=$(gsettings get "$GNOME_SCHEMA" custom-keybindings 2>/dev/null || printf '[]')
 
     NEW_BINDINGS="$CURRENT_BINDINGS"
-    for KEY_PATH in "$GNOME_KEY_PATH" "$GNOME_ALT_KEY_PATH"; do
-        case "$NEW_BINDINGS" in
-            *"$KEY_PATH"*) ;;
-            "@as []"|"[]") NEW_BINDINGS="['$KEY_PATH']" ;;
-            \[*\]) NEW_BINDINGS=$(printf '%s' "$NEW_BINDINGS" | sed "s|]$|, '$KEY_PATH']|") ;;
-            *) NEW_BINDINGS="['$KEY_PATH']" ;;
-        esac
-    done
+    case "$NEW_BINDINGS" in
+        *"$GNOME_KEY_PATH"*) ;;
+        "@as []"|"[]") NEW_BINDINGS="['$GNOME_KEY_PATH']" ;;
+        \[*\]) NEW_BINDINGS=$(printf '%s' "$NEW_BINDINGS" | sed "s|]$|, '$GNOME_KEY_PATH']|") ;;
+        *) NEW_BINDINGS="['$GNOME_KEY_PATH']" ;;
+    esac
 
     gsettings set "$GNOME_SCHEMA" custom-keybindings "$NEW_BINDINGS"
     gsettings set "$GNOME_CUSTOM_SCHEMA" name "rcopy clipboard picker"
     gsettings set "$GNOME_CUSTOM_SCHEMA" command "$RCOPY"
     gsettings set "$GNOME_CUSTOM_SCHEMA" binding "<Control>grave"
-    gsettings set "$GNOME_ALT_CUSTOM_SCHEMA" name "rcopy clipboard picker alternate"
-    gsettings set "$GNOME_ALT_CUSTOM_SCHEMA" command "$RCOPY"
-    gsettings set "$GNOME_ALT_CUSTOM_SCHEMA" binding "<Control><Alt>v"
 fi
 
 cat <<EOF
@@ -124,7 +117,6 @@ bind = CTRL, grave, exec, $RCOPY
 GNOME/Ubuntu Wayland shortcut:
 
 <Control>grave -> $RCOPY
-<Control><Alt>v -> $RCOPY
 
 Your main Hyprland config should source it:
 
