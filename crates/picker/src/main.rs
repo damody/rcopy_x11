@@ -2,11 +2,21 @@ mod ipc_client;
 mod ui;
 mod view_model;
 
+use std::time::{Duration, SystemTime};
+
+const TOGGLE_DEBOUNCE: Duration = Duration::from_millis(700);
+
 fn main() {
-    let Some(_guard) = SingleInstanceGuard::acquire() else {
+    let AcquireResult::Run(_guard) = SingleInstanceGuard::acquire() else {
         return;
     };
     ui::run();
+}
+
+enum AcquireResult {
+    Run(SingleInstanceGuard),
+    ToggledExisting,
+    SuppressedRepeat,
 }
 
 struct SingleInstanceGuard {
@@ -14,23 +24,32 @@ struct SingleInstanceGuard {
 }
 
 impl SingleInstanceGuard {
-    fn acquire() -> Option<Self> {
+    fn acquire() -> AcquireResult {
         let path = lock_path();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
 
+        if toggle_was_recent(&toggle_marker_path(&path)) {
+            return AcquireResult::SuppressedRepeat;
+        }
+
         match create_lock(&path) {
-            Ok(()) => Some(Self { path }),
+            Ok(()) => AcquireResult::Run(Self { path }),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if lock_owner_is_alive(&path) {
-                    None
+                if let Some(pid) = lock_owner_pid(&path).filter(|pid| pid_is_alive(*pid)) {
+                    mark_toggled(&toggle_marker_path(&path));
+                    terminate_process(pid);
+                    AcquireResult::ToggledExisting
                 } else {
                     let _ = std::fs::remove_file(&path);
-                    create_lock(&path).ok().map(|()| Self { path })
+                    create_lock(&path)
+                        .ok()
+                        .map(|()| AcquireResult::Run(Self { path }))
+                        .unwrap_or(AcquireResult::SuppressedRepeat)
                 }
             }
-            Err(_) => None,
+            Err(_) => AcquireResult::SuppressedRepeat,
         }
     }
 }
@@ -51,19 +70,47 @@ fn create_lock(path: &std::path::Path) -> std::io::Result<()> {
     writeln!(file, "{}", std::process::id())
 }
 
-fn lock_owner_is_alive(path: &std::path::Path) -> bool {
-    let Ok(pid) = std::fs::read_to_string(path)
+fn lock_owner_pid(path: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(path)
         .map(|content| content.trim().to_string())
         .and_then(|content| {
             content
                 .parse::<u32>()
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         })
-    else {
+        .ok()
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    std::path::PathBuf::from(format!("/proc/{pid}")).exists()
+}
+
+fn terminate_process(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
+}
+
+fn toggle_was_recent(path: &std::path::Path) -> bool {
+    let Ok(modified) = std::fs::metadata(path).and_then(|metadata| metadata.modified()) else {
         return false;
     };
 
-    std::path::PathBuf::from(format!("/proc/{pid}")).exists()
+    SystemTime::now()
+        .duration_since(modified)
+        .map(|elapsed| elapsed < TOGGLE_DEBOUNCE)
+        .unwrap_or(false)
+}
+
+fn mark_toggled(path: &std::path::Path) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, b"toggled\n");
+}
+
+fn toggle_marker_path(lock_path: &std::path::Path) -> std::path::PathBuf {
+    lock_path.with_extension("toggle")
 }
 
 fn lock_path() -> std::path::PathBuf {
