@@ -40,6 +40,7 @@ Description=rcopy Wayland clipboard daemon
 
 [Service]
 Type=simple
+WorkingDirectory=$ROOT_DIR
 ExecStart=$RCOPYD
 Restart=on-failure
 RestartSec=2
