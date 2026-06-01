@@ -385,7 +385,8 @@ fn render_items(
         ));
     }
 
-    if let Some(row) = list.row_at_index(model.borrow().selected_index as i32) {
+    let selected_index = model.borrow().selected_index as i32;
+    if let Some(row) = list.row_at_index(selected_index) {
         list.select_row(Some(&row));
     }
 }
