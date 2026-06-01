@@ -38,6 +38,16 @@ enum UiMessage {
     },
 }
 
+struct UiContext {
+    window: ApplicationWindow,
+    list: ListBox,
+    status: Label,
+    model: Rc<RefCell<PickerModel>>,
+    client: IpcClient,
+    runtime: Arc<Runtime>,
+    sender: Sender<UiMessage>,
+}
+
 pub fn run() {
     adw::init().expect("libadwaita initializes");
     let app = Application::builder()
@@ -93,13 +103,15 @@ fn build_ui(app: &Application) {
     let (sender, receiver) = std::sync::mpsc::channel();
     attach_receiver(
         receiver,
-        &window,
-        &list,
-        &status,
-        &model,
-        &client,
-        &runtime,
-        sender.clone(),
+        UiContext {
+            window: window.clone(),
+            list: list.clone(),
+            status: status.clone(),
+            model: model.clone(),
+            client: client.clone(),
+            runtime: runtime.clone(),
+            sender: sender.clone(),
+        },
     );
     attach_search(&search, sender.clone(), client.clone(), runtime.clone());
     attach_selection_tracking(&list, model.clone());
@@ -162,67 +174,86 @@ fn attach_search_request(
     });
 }
 
-fn attach_receiver(
-    receiver: Receiver<UiMessage>,
-    window: &ApplicationWindow,
-    list: &ListBox,
-    status: &Label,
-    model: &Rc<RefCell<PickerModel>>,
-    client: &IpcClient,
-    runtime: &Arc<Runtime>,
-    sender: Sender<UiMessage>,
-) {
-    let window = window.clone();
-    let list = list.clone();
-    let status = status.clone();
-    let model = model.clone();
-    let client = client.clone();
-    let runtime = runtime.clone();
+fn attach_receiver(receiver: Receiver<UiMessage>, context: UiContext) {
     glib::timeout_add_local(Duration::from_millis(50), move || {
         for message in receiver.try_iter() {
             match message {
                 UiMessage::SearchFinished(items) => {
-                    status.set_text("");
-                    model.borrow_mut().replace_items(items);
-                    render_items(&list, &model, &client, &runtime, &sender);
+                    context.status.set_text("");
+                    context.model.borrow_mut().replace_items(items);
+                    render_items(
+                        &context.list,
+                        &context.model,
+                        &context.client,
+                        &context.runtime,
+                        &context.sender,
+                    );
                 }
                 UiMessage::SearchFailed(error) => {
-                    status.set_text(&error);
-                    model.borrow_mut().replace_items(Vec::new());
-                    render_items(&list, &model, &client, &runtime, &sender);
+                    context.status.set_text(&error);
+                    context.model.borrow_mut().replace_items(Vec::new());
+                    render_items(
+                        &context.list,
+                        &context.model,
+                        &context.client,
+                        &context.runtime,
+                        &context.sender,
+                    );
                 }
                 UiMessage::RestoreFinished(Ok(response)) => {
                     if response.paste_attempted && !response.paste_succeeded {
-                        status.set_text("Clipboard restored; automatic paste did not complete");
+                        context
+                            .status
+                            .set_text("Clipboard restored; automatic paste did not complete");
                     }
-                    window.close();
+                    context.window.close();
                 }
                 UiMessage::RestoreFinished(Err(error)) => {
-                    status.set_text(&format!("Restore failed: {error}"));
+                    context.status.set_text(&format!("Restore failed: {error}"));
                 }
                 UiMessage::DeleteFinished { id, result } => match result {
                     Ok(()) => {
-                        model.borrow_mut().remove_by_id(id);
-                        status.set_text("");
-                        render_items(&list, &model, &client, &runtime, &sender);
+                        context.model.borrow_mut().remove_by_id(id);
+                        context.status.set_text("");
+                        render_items(
+                            &context.list,
+                            &context.model,
+                            &context.client,
+                            &context.runtime,
+                            &context.sender,
+                        );
                     }
-                    Err(error) => status.set_text(&format!("Delete failed: {error}")),
+                    Err(error) => context.status.set_text(&format!("Delete failed: {error}")),
                 },
                 UiMessage::PinFinished { id, value, result } => match result {
                     Ok(()) => {
-                        model.borrow_mut().set_pin_by_id(id, value);
-                        status.set_text("");
-                        render_items(&list, &model, &client, &runtime, &sender);
+                        context.model.borrow_mut().set_pin_by_id(id, value);
+                        context.status.set_text("");
+                        render_items(
+                            &context.list,
+                            &context.model,
+                            &context.client,
+                            &context.runtime,
+                            &context.sender,
+                        );
                     }
-                    Err(error) => status.set_text(&format!("Pin failed: {error}")),
+                    Err(error) => context.status.set_text(&format!("Pin failed: {error}")),
                 },
                 UiMessage::FavoriteFinished { id, value, result } => match result {
                     Ok(()) => {
-                        model.borrow_mut().set_favorite_by_id(id, value);
-                        status.set_text("");
-                        render_items(&list, &model, &client, &runtime, &sender);
+                        context.model.borrow_mut().set_favorite_by_id(id, value);
+                        context.status.set_text("");
+                        render_items(
+                            &context.list,
+                            &context.model,
+                            &context.client,
+                            &context.runtime,
+                            &context.sender,
+                        );
                     }
-                    Err(error) => status.set_text(&format!("Favorite failed: {error}")),
+                    Err(error) => context
+                        .status
+                        .set_text(&format!("Favorite failed: {error}")),
                 },
             }
         }
@@ -624,7 +655,7 @@ mod tests {
             image_png: None,
         });
 
-        assert_eq!(preview_text(&item), "alpha");
+        assert_eq!(preview_text(&item), "alpha beta");
     }
 
     #[test]

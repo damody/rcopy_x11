@@ -39,6 +39,7 @@ impl PickerModel {
         self.items.get(self.selected_index)
     }
 
+    #[cfg(test)]
     pub fn remove_selected(&mut self) -> Option<ClipboardItem> {
         if self.items.is_empty() {
             return None;
@@ -60,12 +61,14 @@ impl PickerModel {
         Some(removed)
     }
 
+    #[cfg(test)]
     pub fn toggle_selected_pin(&mut self) {
         if let Some(item) = self.items.get_mut(self.selected_index) {
             item.is_pinned = !item.is_pinned;
         }
     }
 
+    #[cfg(test)]
     pub fn toggle_selected_favorite(&mut self) {
         if let Some(item) = self.items.get_mut(self.selected_index) {
             item.is_favorite = !item.is_favorite;
