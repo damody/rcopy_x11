@@ -48,24 +48,13 @@ where
     Ok(CaptureResult::Stored(persisted_id))
 }
 
+#[cfg(test)]
 pub async fn monitor_tick<C>(repo: &Repository, clipboard: &C) -> Result<(), CaptureError>
 where
     C: ClipboardBackend,
 {
     let _ = capture_once(repo, clipboard).await?;
     Ok(())
-}
-
-pub async fn monitor_loop<C>(repo: Repository, clipboard: C, interval: std::time::Duration) -> !
-where
-    C: ClipboardBackend,
-{
-    loop {
-        if let Err(error) = monitor_tick(&repo, &clipboard).await {
-            eprintln!("rcopyd capture warning: {error}");
-        }
-        tokio::time::sleep(interval).await;
-    }
 }
 
 fn mime_types_for(payload: &rcopy_core::ClipboardPayload) -> Vec<String> {

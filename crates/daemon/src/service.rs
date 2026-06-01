@@ -1,3 +1,4 @@
+use crate::capture::{capture_once, CaptureError, CaptureResult};
 use rcopy_core::ClipboardItem;
 use rcopy_integration::{ClipboardBackend, ClipboardError, PasteBackend};
 use rcopy_storage::{Repository, StorageError};
@@ -13,8 +14,15 @@ pub enum ServiceError {
     Storage(#[from] StorageError),
     #[error("clipboard error: {0}")]
     Clipboard(#[from] ClipboardError),
+    #[error("capture error: {0}")]
+    Capture(#[from] CaptureError),
     #[error("plain text payload unavailable: {0}")]
     PlainTextUnavailable(Uuid),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureResponse {
+    pub captured: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +52,13 @@ where
 
     pub fn search(&self, query: &str) -> Result<Vec<ClipboardItem>, ServiceError> {
         Ok(self.repo.search(query)?)
+    }
+
+    pub async fn capture_current(&self) -> Result<CaptureResponse, ServiceError> {
+        let result = capture_once(&self.repo, &self.clipboard).await?;
+        Ok(CaptureResponse {
+            captured: matches!(result, CaptureResult::Stored(_)),
+        })
     }
 
     pub async fn restore(

@@ -17,6 +17,7 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum IpcRequest {
+    Capture,
     Search {
         query: String,
     },
@@ -136,6 +137,7 @@ where
     P: PasteBackend,
 {
     let response = match request {
+        IpcRequest::Capture => serialize_service_result(service.capture_current().await)?,
         IpcRequest::Search { query } => serialize_service_result(service.search(&query))?,
         IpcRequest::Restore {
             id,

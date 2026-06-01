@@ -166,7 +166,10 @@ fn attach_search_request(
 ) {
     let query = query.to_string();
     std::thread::spawn(move || {
-        let message = match runtime.block_on(client.search(&query)) {
+        let message = match runtime.block_on(async {
+            let _ = client.capture_current().await;
+            client.search(&query).await
+        }) {
             Ok(items) => UiMessage::SearchFinished(items),
             Err(error) => UiMessage::SearchFailed(error.to_string()),
         };

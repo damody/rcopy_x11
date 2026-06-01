@@ -10,6 +10,7 @@ use uuid::Uuid;
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum IpcRequest {
+    Capture,
     Search {
         query: String,
     },
@@ -35,6 +36,11 @@ pub enum IpcRequest {
 pub struct RestoreResponse {
     pub paste_attempted: bool,
     pub paste_succeeded: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CaptureResponse {
+    pub captured: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +71,10 @@ impl IpcClient {
             query: query.to_string(),
         })
         .await
+    }
+
+    pub async fn capture_current(&self) -> Result<CaptureResponse> {
+        self.request(IpcRequest::Capture).await
     }
 
     pub async fn restore(
@@ -127,6 +137,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).unwrap(),
             serde_json::json!({"type": "Search", "query": "alpha"})
+        );
+    }
+
+    #[test]
+    fn capture_request_matches_daemon_protocol() {
+        assert_eq!(
+            serde_json::to_value(IpcRequest::Capture).unwrap(),
+            serde_json::json!({"type": "Capture"})
         );
     }
 
