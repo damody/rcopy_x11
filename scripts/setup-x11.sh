@@ -2,11 +2,19 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-RCOPY="$ROOT/target/debug/rcopy"
-RCOPYD="$ROOT/target/debug/rcopyd"
 
-echo "Building rcopy binaries..."
-cargo build -p rcopyd -p rcopy-picker
+if [ -x "$ROOT/target/debug/rcopy" ] && [ -x "$ROOT/target/debug/rcopyd" ]; then
+    RCOPY="$ROOT/target/debug/rcopy"
+    RCOPYD="$ROOT/target/debug/rcopyd"
+    WORKING_DIRECTORY="$ROOT"
+    echo "Building rcopy binaries..."
+    cargo build -p rcopyd -p rcopy-picker
+else
+    RCOPY="/usr/bin/rcopy"
+    RCOPYD="/usr/bin/rcopyd"
+    WORKING_DIRECTORY="${XDG_DATA_HOME:-$HOME/.local/share}/rcopy-x11"
+    mkdir -p "$WORKING_DIRECTORY"
+fi
 
 if [ "${XDG_SESSION_TYPE:-}" != "x11" ]; then
     printf '%s\n' "Warning: this session is not X11. rcopy_x11 requires an X11 session." >&2
@@ -26,7 +34,7 @@ Description=rcopy X11 clipboard daemon
 
 [Service]
 Type=simple
-WorkingDirectory=$ROOT
+WorkingDirectory=$WORKING_DIRECTORY
 ExecStart=$RCOPYD
 Restart=on-failure
 
