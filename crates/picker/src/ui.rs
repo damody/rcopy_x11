@@ -39,6 +39,17 @@ enum UiMessage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyAction {
+    Close,
+    MoveUp,
+    MoveDown,
+    Restore { plain_text_only: bool },
+    Delete,
+    TogglePin,
+    ToggleFavorite,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SearchMode {
     SearchOnly,
     CaptureThenSearch,
@@ -302,39 +313,46 @@ fn keyboard_controller(
     let controller = EventControllerKey::new();
     let window_for_keys = window.clone();
     let list_for_keys = list.clone();
-    controller.connect_key_pressed(move |_, key, _, state| match key {
-        gdk::Key::Escape => {
-            window_for_keys.close();
-            glib::Propagation::Stop
+    controller.connect_key_pressed(move |_, key, _, state| {
+        let Some(action) = key_action(key, state) else {
+            return glib::Propagation::Proceed;
+        };
+
+        match action {
+            KeyAction::Close => window_for_keys.close(),
+            KeyAction::MoveUp => select_previous(&list_for_keys, &model),
+            KeyAction::MoveDown => select_next(&list_for_keys, &model),
+            KeyAction::Restore { plain_text_only } => {
+                restore_selected(&model, &client, &runtime, &sender, plain_text_only);
+            }
+            KeyAction::Delete => delete_selected(&model, &client, &runtime, &sender),
+            KeyAction::TogglePin => toggle_pin_selected(&model, &client, &runtime, &sender),
+            KeyAction::ToggleFavorite => {
+                toggle_favorite_selected(&model, &client, &runtime, &sender);
+            }
         }
-        gdk::Key::Up => {
-            select_previous(&list_for_keys, &model);
-            glib::Propagation::Stop
-        }
-        gdk::Key::Down => {
-            select_next(&list_for_keys, &model);
-            glib::Propagation::Stop
-        }
-        gdk::Key::Return | gdk::Key::KP_Enter => {
-            let plain_text_only = state.contains(gdk::ModifierType::SHIFT_MASK);
-            restore_selected(&model, &client, &runtime, &sender, plain_text_only);
-            glib::Propagation::Stop
-        }
-        gdk::Key::Delete => {
-            delete_selected(&model, &client, &runtime, &sender);
-            glib::Propagation::Stop
-        }
-        gdk::Key::p if state.contains(gdk::ModifierType::CONTROL_MASK) => {
-            toggle_pin_selected(&model, &client, &runtime, &sender);
-            glib::Propagation::Stop
-        }
-        gdk::Key::f if state.contains(gdk::ModifierType::CONTROL_MASK) => {
-            toggle_favorite_selected(&model, &client, &runtime, &sender);
-            glib::Propagation::Stop
-        }
-        _ => glib::Propagation::Proceed,
+        glib::Propagation::Stop
     });
     controller
+}
+
+fn key_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyAction> {
+    match key {
+        gdk::Key::Escape => Some(KeyAction::Close),
+        gdk::Key::Up | gdk::Key::KP_Up => Some(KeyAction::MoveUp),
+        gdk::Key::Down | gdk::Key::KP_Down => Some(KeyAction::MoveDown),
+        gdk::Key::Return | gdk::Key::KP_Enter => Some(KeyAction::Restore {
+            plain_text_only: state.contains(gdk::ModifierType::SHIFT_MASK),
+        }),
+        gdk::Key::Delete => Some(KeyAction::Delete),
+        gdk::Key::p if state.contains(gdk::ModifierType::CONTROL_MASK) => {
+            Some(KeyAction::TogglePin)
+        }
+        gdk::Key::f if state.contains(gdk::ModifierType::CONTROL_MASK) => {
+            Some(KeyAction::ToggleFavorite)
+        }
+        _ => None,
+    }
 }
 
 fn render_items(list: &ListBox, model: &Rc<RefCell<PickerModel>>) {
@@ -478,8 +496,10 @@ fn select_next(list: &ListBox, model: &Rc<RefCell<PickerModel>>) {
 }
 
 fn select_model_row(list: &ListBox, model: &Rc<RefCell<PickerModel>>) {
-    if let Some(row) = list.row_at_index(model.borrow().selected_index as i32) {
+    let selected_index = model.borrow().selected_index as i32;
+    if let Some(row) = list.row_at_index(selected_index) {
         list.select_row(Some(&row));
+        refresh_row_labels(list, model);
     }
 }
 
@@ -678,6 +698,26 @@ mod tests {
         assert_eq!(
             startup_search_modes(),
             [SearchMode::SearchOnly, SearchMode::CaptureThenSearch]
+        );
+    }
+
+    #[test]
+    fn arrow_keys_map_to_selection_actions() {
+        assert_eq!(
+            key_action(gdk::Key::Up, gdk::ModifierType::empty()),
+            Some(KeyAction::MoveUp)
+        );
+        assert_eq!(
+            key_action(gdk::Key::Down, gdk::ModifierType::empty()),
+            Some(KeyAction::MoveDown)
+        );
+        assert_eq!(
+            key_action(gdk::Key::KP_Up, gdk::ModifierType::empty()),
+            Some(KeyAction::MoveUp)
+        );
+        assert_eq!(
+            key_action(gdk::Key::KP_Down, gdk::ModifierType::empty()),
+            Some(KeyAction::MoveDown)
         );
     }
 
