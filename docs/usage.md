@@ -1,21 +1,20 @@
-# rcopy Usage
+# rcopy_x11 Usage
 
 ## Supported Environment
 
-`rcopy` targets Hyprland and wlroots-based Wayland sessions. GNOME and KDE are
-outside the first-version support target.
+`rcopy_x11` targets X11 desktop sessions.
 
 The project is a Rust workspace with these runtime pieces:
 
 - `rcopyd`: background daemon for clipboard capture and picker IPC
-- `rcopy-picker`: package that builds the GTK picker binary
+- `rcopy-picker`: package that builds the GTK picker binary named `rcopy`
 
 ## Dependencies
 
 Install the runtime command dependencies:
 
-- `wl-clipboard`, which provides `wl-paste` and `wl-copy`
-- `wtype`, used only for automatic paste after restore
+- `xclip`, used for X11 clipboard reads and writes
+- `xdotool`, used only for automatic paste after restore
 
 Install GTK4 and Libadwaita runtime and development packages before building the
 picker. Common package names:
@@ -24,7 +23,18 @@ picker. Common package names:
 - Fedora: `gtk4-devel`, `libadwaita-devel`
 - Arch Linux: `gtk4`, `libadwaita`
 
-## Start rcopy
+## Setup
+
+Run:
+
+```bash
+./scripts/setup-x11.sh
+```
+
+The script builds the binaries, installs the `rcopyd` user service, and installs
+a GNOME/Ubuntu custom shortcut for `Ctrl+\`` when `gsettings` is available.
+
+## Start Manually
 
 Start the daemon in one terminal:
 
@@ -43,34 +53,22 @@ daemon and picker communicate over the default socket path
 `$XDG_RUNTIME_DIR/rcopy/rcopyd.sock`. If `XDG_RUNTIME_DIR` is unavailable, the
 fallback is a user-scoped temp directory like `/tmp/rcopy-$UID/rcopyd.sock`.
 
-## Hyprland Binding
-
-Add a Ctrl+backtick binding like this to `hyprland.conf`:
-
-```text
-bind = CTRL, grave, exec, cargo run --manifest-path /home/damody/work/rcopy/Cargo.toml -p rcopy-picker
-```
-
-Run `cargo run -p rcopyd` from the repo before using the binding. A session
-manager or Hyprland `exec-once` entry can keep the daemon running once you choose
-how you want to install it.
-
 ## Clipboard Behavior
 
-The daemon polls the clipboard and captures:
+The daemon captures:
 
 - `text/plain`
 - `text/html`
 - `image/png`
 
-Unsupported MIME types are ignored. If at least one supported payload is present,
-the item is stored. Duplicate payloads are collapsed by content hash and moved
-back to the top when seen again.
+Unsupported MIME targets are ignored. If at least one supported payload is
+present, the item is stored. Duplicate payloads are collapsed by content hash and
+moved back to the top when seen again.
 
-When restoring, `rcopyd` writes the selected item back with `wl-copy`. The current
-backend writes one representation per restore: `image/png` first, `text/html`
-second, and `text/plain` last. `Shift+Enter` in the picker requests a plain-text
-restore and writes only `text/plain` when the item has that representation.
+When restoring, `rcopyd` writes the selected item back with `xclip`. The backend
+writes one representation per restore: `image/png` first, `text/plain` second,
+and `text/html` last. `Shift+Enter` in the picker requests a plain-text restore
+and writes only `text/plain` when the item has that representation.
 
 ## Picker Controls
 
@@ -83,20 +81,38 @@ restore and writes only `text/plain` when the item has that representation.
 - `Ctrl+F` toggles favorite.
 - `Escape` closes the picker.
 
-Rows also include Pin and Favorite buttons. Deleted items are soft-deleted and no
-longer appear in picker results.
+Deleted items are soft-deleted and no longer appear in picker results.
 
 ## Paste Behavior
 
 Automatic paste uses:
 
 ```bash
-wtype -M ctrl -k v -m ctrl
+xdotool key ctrl+v
 ```
 
-If `wtype` is missing, unavailable to the compositor, or exits with an error,
-rcopy still leaves the restored content on the clipboard so you can paste
-manually.
+If `xdotool` is missing or exits with an error, rcopy still leaves the restored
+content on the clipboard so you can paste manually.
+
+## Manual Clipboard Commands
+
+List X11 clipboard targets:
+
+```bash
+xclip -selection clipboard -t TARGETS -o
+```
+
+Write plain text to the X11 clipboard:
+
+```bash
+printf 'hello' | xclip -selection clipboard -t text/plain -i
+```
+
+Read plain text from the X11 clipboard:
+
+```bash
+xclip -selection clipboard -t text/plain -o
+```
 
 ## Not Included
 
@@ -106,20 +122,19 @@ daemon.
 
 ## Manual Verification Checklist
 
-1. Start a Hyprland or wlroots-based Wayland session.
-2. Confirm `wl-paste`, `wl-copy`, and `wtype` are available on `PATH`.
+1. Start an X11 session.
+2. Confirm `xclip` and `xdotool` are available on `PATH`.
 3. Run `cargo run -p rcopyd` and leave it running.
 4. Copy plain text and open the picker with `cargo run -p rcopy-picker`.
 5. Confirm the text item appears and search can find it.
-6. Copy rich HTML from a browser and confirm the item appears with HTML/text
-   content available.
+6. Copy rich HTML from a browser and confirm the item appears with text content.
 7. Copy a PNG image and confirm an image item appears.
-8. Pin and favorite an item, then close and reopen the picker to confirm the
-   flags persist.
+8. Pin and favorite an item with `Ctrl+P` and `Ctrl+F`, then close and reopen
+   the picker to confirm the flags persist.
 9. Delete an item and confirm it no longer appears in picker results.
 10. Select an item with `Enter` and confirm it returns to the clipboard and
     attempts paste.
 11. Select a rich text item with `Shift+Enter` and confirm the plain-text version
     is restored.
-12. Temporarily run the picker with `wtype` unavailable on `PATH`, select an
+12. Temporarily run the picker with `xdotool` unavailable on `PATH`, select an
     item, and confirm manual paste still works from the restored clipboard.
