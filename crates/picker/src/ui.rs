@@ -38,6 +38,12 @@ enum UiMessage {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchMode {
+    SearchOnly,
+    CaptureThenSearch,
+}
+
 struct UiContext {
     window: ApplicationWindow,
     list: ListBox,
@@ -146,10 +152,13 @@ fn attach_search(
             search_client.clone(),
             search_runtime.clone(),
             entry.text().as_ref(),
+            SearchMode::SearchOnly,
         );
     });
 
-    attach_search_request(sender, client, runtime, "");
+    for mode in startup_search_modes() {
+        attach_search_request(sender.clone(), client.clone(), runtime.clone(), "", mode);
+    }
 }
 
 fn attach_search_request(
@@ -157,11 +166,14 @@ fn attach_search_request(
     client: IpcClient,
     runtime: Arc<Runtime>,
     query: &str,
+    mode: SearchMode,
 ) {
     let query = query.to_string();
     std::thread::spawn(move || {
         let message = match runtime.block_on(async {
-            let _ = client.capture_current().await;
+            if mode == SearchMode::CaptureThenSearch {
+                let _ = client.capture_current().await;
+            }
             client.search(&query).await
         }) {
             Ok(items) => UiMessage::SearchFinished(items),
@@ -169,6 +181,10 @@ fn attach_search_request(
         };
         let _ = sender.send(message);
     });
+}
+
+fn startup_search_modes() -> [SearchMode; 2] {
+    [SearchMode::SearchOnly, SearchMode::CaptureThenSearch]
 }
 
 fn attach_receiver(receiver: Receiver<UiMessage>, context: UiContext) {
@@ -655,6 +671,14 @@ mod tests {
         });
 
         assert_eq!(item_label_text(&item, false), "alpha beta");
+    }
+
+    #[test]
+    fn startup_search_modes_show_cached_items_before_capture_refresh() {
+        assert_eq!(
+            startup_search_modes(),
+            [SearchMode::SearchOnly, SearchMode::CaptureThenSearch]
+        );
     }
 
     #[test]
