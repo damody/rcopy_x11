@@ -19,7 +19,7 @@ impl Default for AppConfig {
             database_path: PathBuf::from("rcopy.db"),
             max_history_items: 10_000,
             auto_paste: true,
-            paste_command: "wtype".to_string(),
+            paste_command: "xdotool".to_string(),
             capture_text: true,
             capture_html: true,
             capture_images: true,
@@ -44,7 +44,7 @@ mod tests {
         assert!(config.capture_html);
         assert!(config.capture_images);
         assert!(config.auto_paste);
-        assert_eq!(config.paste_command, "wtype");
+        assert_eq!(config.paste_command, "xdotool");
     }
 
     #[test]

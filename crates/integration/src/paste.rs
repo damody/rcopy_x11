@@ -27,11 +27,11 @@ impl PasteBackend for DisabledPasteBackend {
 }
 
 #[derive(Clone, Debug)]
-pub struct WtypePasteBackend {
+pub struct XdotoolPasteBackend {
     command: String,
 }
 
-impl WtypePasteBackend {
+impl XdotoolPasteBackend {
     pub fn new(command: impl Into<String>) -> Self {
         Self {
             command: command.into(),
@@ -40,10 +40,10 @@ impl WtypePasteBackend {
 }
 
 #[async_trait]
-impl PasteBackend for WtypePasteBackend {
+impl PasteBackend for XdotoolPasteBackend {
     async fn paste(&self) -> Result<(), PasteError> {
         let status = Command::new(OsStr::new(&self.command))
-            .args(["-M", "ctrl", "-k", "v", "-m", "ctrl"])
+            .args(["key", "ctrl+v"])
             .status()
             .await
             .map_err(|error| match error.kind() {
@@ -86,24 +86,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wtype_paste_backend_sends_ctrl_v_key_event() {
+    async fn xdotool_paste_backend_sends_ctrl_v_key_event() {
         let temp = temp_dir();
-        let log = temp.join("wtype.log");
-        let wtype = write_executable(
+        let log = temp.join("xdotool.log");
+        let xdotool = write_executable(
             &temp,
-            "wtype",
+            "xdotool",
             &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" > {}\n", shell_quote(&log)),
         );
-        let paste = WtypePasteBackend::new(wtype.to_string_lossy().into_owned());
+        let paste = XdotoolPasteBackend::new(xdotool.to_string_lossy().into_owned());
 
         paste.paste().await.unwrap();
 
-        assert_eq!(fs::read_to_string(log).unwrap(), "-M ctrl -k v -m ctrl\n");
+        assert_eq!(fs::read_to_string(log).unwrap(), "key ctrl+v\n");
     }
 
     #[tokio::test]
-    async fn wtype_paste_backend_reports_missing_command_as_unavailable() {
-        let paste = WtypePasteBackend::new("rcopy-definitely-missing-wtype");
+    async fn xdotool_paste_backend_reports_missing_command_as_unavailable() {
+        let paste = XdotoolPasteBackend::new("rcopy-definitely-missing-xdotool");
 
         let error = paste.paste().await.unwrap_err();
 
