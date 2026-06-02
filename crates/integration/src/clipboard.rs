@@ -701,7 +701,10 @@ exit 1
     fn xclip_read_fixture(dir: &Path, targets: &str, entries: &[(&str, &str)]) -> PathBuf {
         let mut script = String::from("#!/bin/sh\n");
         script.push_str("case \"$4\" in\n");
-        script.push_str(&format!("  TARGETS) printf '%s' {} ;;\n", shell_quote_str(targets)));
+        script.push_str(&format!(
+            "  TARGETS) printf '%s' {} ;;\n",
+            shell_quote_str(targets)
+        ));
         for (mime, value) in entries {
             script.push_str(&format!(
                 "  {}) printf '%s' {} ;;\n",
