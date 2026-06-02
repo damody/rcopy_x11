@@ -67,20 +67,20 @@ impl ClipboardBackend for MemoryClipboard {
 }
 
 #[derive(Clone, Debug)]
-pub struct WlClipboard {
+pub struct X11Clipboard {
     paste_command: String,
     copy_command: String,
 }
 
-impl Default for WlClipboard {
+impl Default for X11Clipboard {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl WlClipboard {
+impl X11Clipboard {
     pub fn new() -> Self {
-        Self::with_commands("wl-paste", "wl-copy")
+        Self::with_commands("xclip", "xclip")
     }
 
     pub fn with_commands(
@@ -95,7 +95,7 @@ impl WlClipboard {
 }
 
 #[async_trait]
-impl ClipboardBackend for WlClipboard {
+impl ClipboardBackend for X11Clipboard {
     async fn read_supported(&self) -> Result<ClipboardPayload, ClipboardError> {
         let offered = list_offered_mimes(&self.paste_command).await?;
 
@@ -232,14 +232,14 @@ fn decode_basic_html_entities(text: &str) -> String {
 
 async fn list_offered_mimes(command: impl AsRef<OsStr>) -> Result<Vec<String>, ClipboardError> {
     let output = command_output(
-        Command::new(command).args(["--list-types"]),
-        "wl-paste --list-types",
+        Command::new(command).args(["-selection", "clipboard", "-t", "TARGETS", "-o"]),
+        "xclip -selection clipboard -t TARGETS -o",
     )
     .await?;
 
     if !output.status.success() {
         return Err(ClipboardError::Command(format!(
-            "wl-paste --list-types failed: {}",
+            "xclip TARGETS failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
@@ -282,7 +282,7 @@ impl WriteMime<'_> {
 }
 
 fn select_single_write_mime(payload: &ClipboardPayload) -> Option<WriteMime<'_>> {
-    // wl-copy accepts one advertised type per invocation. Until the backend grows
+    // xclip accepts one advertised type per invocation. Until the backend grows
     // real multi-MIME support, write exactly one best representation.
     if let Some(image) = &payload.image_png {
         Some(WriteMime::ImagePng(image))
@@ -318,13 +318,13 @@ async fn read_mime(
     mime: &str,
 ) -> Result<ReadResult<String>, ClipboardError> {
     let output = command_output(
-        Command::new(command).args(["--no-newline", "--type", mime]),
-        &format!("wl-paste --type {mime}"),
+        Command::new(command).args(["-selection", "clipboard", "-t", mime, "-o"]),
+        &format!("xclip -selection clipboard -t {mime} -o"),
     )
     .await?;
 
     if !output.status.success() {
-        return classify_wl_paste_failure(mime, &output);
+        return classify_xclip_failure(mime, &output);
     }
 
     String::from_utf8(output.stdout)
@@ -337,13 +337,13 @@ async fn read_bytes(
     mime: &str,
 ) -> Result<ReadResult<Vec<u8>>, ClipboardError> {
     let output = command_output(
-        Command::new(command).args(["--type", mime]),
-        &format!("wl-paste --type {mime}"),
+        Command::new(command).args(["-selection", "clipboard", "-t", mime, "-o"]),
+        &format!("xclip -selection clipboard -t {mime} -o"),
     )
     .await?;
 
     if !output.status.success() {
-        return classify_wl_paste_failure(mime, &output);
+        return classify_xclip_failure(mime, &output);
     }
 
     Ok(ReadResult::Available(output.stdout))
@@ -359,7 +359,7 @@ async fn command_output(
         .map_err(|error| ClipboardError::Command(error.to_string()))
 }
 
-fn classify_wl_paste_failure<T>(
+fn classify_xclip_failure<T>(
     mime: &str,
     output: &std::process::Output,
 ) -> Result<ReadResult<T>, ClipboardError> {
@@ -367,7 +367,7 @@ fn classify_wl_paste_failure<T>(
         Ok(ReadResult::Unsupported)
     } else {
         Err(ClipboardError::Command(format!(
-            "wl-paste failed for {mime}: {}",
+            "xclip failed for {mime}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )))
     }
@@ -379,7 +379,7 @@ async fn write_mime(
     bytes: &[u8],
 ) -> Result<(), ClipboardError> {
     let mut child = Command::new(command)
-        .args(["--type", mime])
+        .args(["-selection", "clipboard", "-t", mime, "-i"])
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|error| ClipboardError::Command(error.to_string()))?;
@@ -387,7 +387,7 @@ async fn write_mime(
     child
         .stdin
         .as_mut()
-        .ok_or_else(|| ClipboardError::Command("wl-copy stdin unavailable".into()))?
+        .ok_or_else(|| ClipboardError::Command("xclip stdin unavailable".into()))?
         .write_all(bytes)
         .await
         .map_err(|error| ClipboardError::Command(error.to_string()))?;
@@ -401,7 +401,7 @@ async fn write_mime(
         Ok(())
     } else {
         Err(ClipboardError::Command(format!(
-            "wl-copy failed for {mime} with {status}"
+            "xclip failed for {mime} with {status}"
         )))
     }
 }
@@ -434,22 +434,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wl_clipboard_prefers_plain_text_over_html_when_both_are_available() {
+    async fn x11_clipboard_prefers_plain_text_over_html_when_both_are_available() {
         let temp = temp_dir();
-        let wl_paste = write_executable(
+        let xclip = write_executable(
             &temp,
-            "wl-paste",
+            "xclip",
             r#"#!/bin/sh
-if [ "$1" = "--list-types" ]; then
-  printf 'text/plain\ntext/html\nimage/png\n'
-  exit 0
-fi
-if [ "$1" = "--no-newline" ]; then
-  mime="$3"
-else
-  mime="$2"
-fi
-case "$mime" in
+case "$4" in
+  TARGETS) printf 'text/plain\ntext/html\nimage/png\n' ;;
   text/plain) printf 'alpha' ;;
   text/html) printf '<b>alpha</b>' ;;
   image/png) printf '\211PNG' ;;
@@ -457,11 +449,7 @@ case "$mime" in
 esac
 "#,
         );
-        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let clipboard = x11_clipboard(&xclip);
 
         let payload = clipboard.read_supported().await.unwrap();
 
@@ -471,33 +459,17 @@ esac
     }
 
     #[tokio::test]
-    async fn wl_clipboard_reads_parameterized_plain_text_mime() {
+    async fn x11_clipboard_reads_parameterized_plain_text_mime() {
         let temp = temp_dir();
-        let wl_paste = write_executable(
+        let xclip = xclip_read_fixture(
             &temp,
-            "wl-paste",
-            r#"#!/bin/sh
-if [ "$1" = "--list-types" ]; then
-  printf 'text/plain;charset=utf-8\ntext/html\n'
-  exit 0
-fi
-if [ "$1" = "--no-newline" ]; then
-  mime="$3"
-else
-  mime="$2"
-fi
-case "$mime" in
-  'text/plain;charset=utf-8') printf 'plain alpha' ;;
-  text/html) printf '<b>html alpha</b>' ;;
-  *) exit 1 ;;
-esac
-"#,
+            "text/plain;charset=utf-8\ntext/html\n",
+            &[
+                ("text/plain;charset=utf-8", "plain alpha"),
+                ("text/html", "<b>html alpha</b>"),
+            ],
         );
-        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let clipboard = x11_clipboard(&xclip);
 
         let payload = clipboard.read_supported().await.unwrap();
 
@@ -507,28 +479,17 @@ esac
     }
 
     #[tokio::test]
-    async fn wl_clipboard_strips_html_document_from_plain_text_payload() {
+    async fn x11_clipboard_strips_html_document_from_plain_text_payload() {
         let temp = temp_dir();
-        let wl_paste = write_executable(
+        let xclip = xclip_read_fixture(
             &temp,
-            "wl-paste",
-            r#"#!/bin/sh
-if [ "$1" = "--list-types" ]; then
-  printf 'text/plain;charset=utf-8\n'
-  exit 0
-fi
-if [ "$1" = "--no-newline" ] && [ "$3" = "text/plain;charset=utf-8" ]; then
-  printf '<html><body><!--StartFragment--><pre><div><span>  現在 `Ctrl+`` 的行為是：</span></div></pre><!--EndFragment--></body></html>'
-  exit 0
-fi
-exit 1
-"#,
+            "text/plain;charset=utf-8\n",
+            &[(
+                "text/plain;charset=utf-8",
+                "<html><body><!--StartFragment--><pre><div><span>  現在 `Ctrl+`` 的行為是：</span></div></pre><!--EndFragment--></body></html>",
+            )],
         );
-        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let clipboard = x11_clipboard(&xclip);
 
         let payload = clipboard.read_supported().await.unwrap();
 
@@ -540,32 +501,10 @@ exit 1
     }
 
     #[tokio::test]
-    async fn wl_clipboard_reads_html_when_plain_text_is_unavailable() {
+    async fn x11_clipboard_reads_html_when_plain_text_is_unavailable() {
         let temp = temp_dir();
-        let wl_paste = write_executable(
-            &temp,
-            "wl-paste",
-            r#"#!/bin/sh
-if [ "$1" = "--list-types" ]; then
-  printf 'text/html\n'
-  exit 0
-fi
-if [ "$1" = "--no-newline" ]; then
-  mime="$3"
-else
-  mime="$2"
-fi
-case "$mime" in
-  text/html) printf '<b>alpha</b>' ;;
-  *) exit 1 ;;
-esac
-"#,
-        );
-        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let xclip = xclip_read_fixture(&temp, "text/html\n", &[("text/html", "<b>alpha</b>")]);
+        let clipboard = x11_clipboard(&xclip);
 
         let payload = clipboard.read_supported().await.unwrap();
 
@@ -575,22 +514,11 @@ esac
     }
 
     #[tokio::test]
-    async fn wl_clipboard_writes_payload_to_configured_command_by_mime() {
+    async fn x11_clipboard_writes_payload_to_configured_command_by_mime() {
         let temp = temp_dir();
         let log = temp.join("copy.log");
-        let wl_paste = write_executable(&temp, "wl-paste", "#!/bin/sh\nexit 1\n");
-        let wl_copy = write_executable(
-            &temp,
-            "wl-copy",
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncat >/dev/null\n",
-                shell_quote(&log)
-            ),
-        );
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let xclip = xclip_write_fixture(&temp, &log);
+        let clipboard = x11_clipboard(&xclip);
         let payload = ClipboardPayload {
             text_plain: Some("alpha".into()),
             text_html: Some("<b>alpha</b>".into()),
@@ -599,26 +527,18 @@ esac
 
         clipboard.write_payload(&payload).await.unwrap();
 
-        assert_eq!(fs::read_to_string(log).unwrap(), "--type image/png\n");
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "-selection clipboard -t image/png -i\n"
+        );
     }
 
     #[tokio::test]
-    async fn wl_clipboard_write_prefers_plain_text_over_html_when_both_are_present() {
+    async fn x11_clipboard_write_prefers_plain_text_over_html_when_both_are_present() {
         let temp = temp_dir();
         let log = temp.join("copy.log");
-        let wl_paste = write_executable(&temp, "wl-paste", "#!/bin/sh\nexit 1\n");
-        let wl_copy = write_executable(
-            &temp,
-            "wl-copy",
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncat >/dev/null\n",
-                shell_quote(&log)
-            ),
-        );
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let xclip = xclip_write_fixture(&temp, &log);
+        let clipboard = x11_clipboard(&xclip);
         let payload = ClipboardPayload {
             text_plain: Some("alpha".into()),
             text_html: Some("<b>alpha</b>".into()),
@@ -627,26 +547,18 @@ esac
 
         clipboard.write_payload(&payload).await.unwrap();
 
-        assert_eq!(fs::read_to_string(log).unwrap(), "--type text/plain\n");
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "-selection clipboard -t text/plain -i\n"
+        );
     }
 
     #[tokio::test]
-    async fn wl_clipboard_write_uses_html_when_plain_text_is_absent() {
+    async fn x11_clipboard_write_uses_html_when_plain_text_is_absent() {
         let temp = temp_dir();
         let log = temp.join("copy.log");
-        let wl_paste = write_executable(&temp, "wl-paste", "#!/bin/sh\nexit 1\n");
-        let wl_copy = write_executable(
-            &temp,
-            "wl-copy",
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncat >/dev/null\n",
-                shell_quote(&log)
-            ),
-        );
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let xclip = xclip_write_fixture(&temp, &log);
+        let clipboard = x11_clipboard(&xclip);
         let payload = ClipboardPayload {
             text_plain: None,
             text_html: Some("<b>alpha</b>".into()),
@@ -655,26 +567,18 @@ esac
 
         clipboard.write_payload(&payload).await.unwrap();
 
-        assert_eq!(fs::read_to_string(log).unwrap(), "--type text/html\n");
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "-selection clipboard -t text/html -i\n"
+        );
     }
 
     #[tokio::test]
-    async fn wl_clipboard_write_uses_plain_text_when_only_text_is_present() {
+    async fn x11_clipboard_write_uses_plain_text_when_only_text_is_present() {
         let temp = temp_dir();
         let log = temp.join("copy.log");
-        let wl_paste = write_executable(&temp, "wl-paste", "#!/bin/sh\nexit 1\n");
-        let wl_copy = write_executable(
-            &temp,
-            "wl-copy",
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncat >/dev/null\n",
-                shell_quote(&log)
-            ),
-        );
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let xclip = xclip_write_fixture(&temp, &log);
+        let clipboard = x11_clipboard(&xclip);
         let payload = ClipboardPayload {
             text_plain: Some("alpha".into()),
             text_html: None,
@@ -683,23 +587,25 @@ esac
 
         clipboard.write_payload(&payload).await.unwrap();
 
-        assert_eq!(fs::read_to_string(log).unwrap(), "--type text/plain\n");
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "-selection clipboard -t text/plain -i\n"
+        );
     }
 
     #[tokio::test]
-    async fn wl_clipboard_write_strips_html_document_from_plain_text_payload() {
+    async fn x11_clipboard_write_strips_html_document_from_plain_text_payload() {
         let temp = temp_dir();
         let output = temp.join("copy.out");
-        let wl_paste = write_executable(&temp, "wl-paste", "#!/bin/sh\nexit 1\n");
-        let wl_copy = write_executable(
+        let xclip = write_executable(
             &temp,
-            "wl-copy",
-            &format!("#!/bin/sh\ncat > {}\n", shell_quote(&output)),
+            "xclip",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >/dev/null\ncat > {}\n",
+                shell_quote(&output)
+            ),
         );
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let clipboard = x11_clipboard(&xclip);
         let payload = ClipboardPayload {
             text_plain: Some(
                 "<html><body><!--StartFragment--><span>現在 `Ctrl+`` 的行為是：</span></body></html>"
@@ -718,10 +624,10 @@ esac
     }
 
     #[tokio::test]
-    async fn wl_clipboard_read_returns_error_when_command_cannot_spawn() {
-        let clipboard = WlClipboard::with_commands(
-            "rcopy-definitely-missing-wl-paste",
-            "rcopy-definitely-missing-wl-copy",
+    async fn x11_clipboard_read_returns_error_when_command_cannot_spawn() {
+        let clipboard = X11Clipboard::with_commands(
+            "rcopy-definitely-missing-xclip",
+            "rcopy-definitely-missing-xclip",
         );
 
         let error = clipboard.read_supported().await.unwrap_err();
@@ -730,32 +636,10 @@ esac
     }
 
     #[tokio::test]
-    async fn wl_clipboard_read_leaves_unsupported_mimes_empty() {
+    async fn x11_clipboard_read_leaves_unsupported_mimes_empty() {
         let temp = temp_dir();
-        let wl_paste = write_executable(
-            &temp,
-            "wl-paste",
-            r#"#!/bin/sh
-if [ "$1" = "--list-types" ]; then
-  printf 'text/plain\n'
-  exit 0
-fi
-if [ "$1" = "--no-newline" ]; then
-  mime="$3"
-else
-  mime="$2"
-fi
-case "$mime" in
-  text/plain) printf 'alpha' ;;
-  *) exit 1 ;;
-esac
-"#,
-        );
-        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let xclip = xclip_read_fixture(&temp, "text/plain\n", &[("text/plain", "alpha")]);
+        let clipboard = x11_clipboard(&xclip);
 
         let payload = clipboard.read_supported().await.unwrap();
 
@@ -765,18 +649,14 @@ esac
     }
 
     #[tokio::test]
-    async fn wl_clipboard_read_returns_error_when_backend_fails_for_every_mime() {
+    async fn x11_clipboard_read_returns_error_when_backend_fails_for_every_mime() {
         let temp = temp_dir();
-        let wl_paste = write_executable(
+        let xclip = write_executable(
             &temp,
-            "wl-paste",
-            "#!/bin/sh\nprintf 'wayland unavailable\\n' >&2\nexit 2\n",
+            "xclip",
+            "#!/bin/sh\nprintf 'x11 clipboard unavailable\\n' >&2\nexit 2\n",
         );
-        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let clipboard = x11_clipboard(&xclip);
 
         let error = clipboard.read_supported().await.unwrap_err();
 
@@ -784,37 +664,72 @@ esac
     }
 
     #[tokio::test]
-    async fn wl_clipboard_does_not_read_unoffered_image_mime() {
+    async fn x11_clipboard_does_not_read_unoffered_image_mime() {
         let temp = temp_dir();
-        let wl_paste = write_executable(
+        let xclip = write_executable(
             &temp,
-            "wl-paste",
+            "xclip",
             r#"#!/bin/sh
-if [ "$1" = "--list-types" ]; then
+if [ "$4" = "TARGETS" ]; then
   printf 'text/plain\n'
   exit 0
 fi
-if [ "$1" = "--no-newline" ] && [ "$3" = "text/plain" ]; then
+if [ "$4" = "text/plain" ]; then
   printf 'alpha'
   exit 0
 fi
-if [ "$2" = "image/png" ]; then
+if [ "$4" = "image/png" ]; then
   printf 'image/png should not be read\n' >&2
   exit 9
 fi
 exit 1
 "#,
         );
-        let wl_copy = write_executable(&temp, "wl-copy", "#!/bin/sh\ncat >/dev/null\n");
-        let clipboard = WlClipboard::with_commands(
-            wl_paste.to_string_lossy().into_owned(),
-            wl_copy.to_string_lossy().into_owned(),
-        );
+        let clipboard = x11_clipboard(&xclip);
 
         let payload = clipboard.read_supported().await.unwrap();
 
         assert_eq!(payload.text_plain.as_deref(), Some("alpha"));
         assert_eq!(payload.image_png, None);
+    }
+
+    fn x11_clipboard(xclip: &Path) -> X11Clipboard {
+        let command = xclip.to_string_lossy().into_owned();
+        X11Clipboard::with_commands(command.clone(), command)
+    }
+
+    fn xclip_read_fixture(dir: &Path, targets: &str, entries: &[(&str, &str)]) -> PathBuf {
+        let mut script = String::from("#!/bin/sh\n");
+        script.push_str("case \"$4\" in\n");
+        script.push_str(&format!("  TARGETS) printf '%s' {} ;;\n", shell_quote_str(targets)));
+        for (mime, value) in entries {
+            script.push_str(&format!(
+                "  {}) printf '%s' {} ;;\n",
+                shell_case_pattern(mime),
+                shell_quote_str(value)
+            ));
+        }
+        script.push_str("  *) exit 1 ;;\nesac\n");
+        write_executable(dir, "xclip", &script)
+    }
+
+    fn xclip_write_fixture(dir: &Path, log: &Path) -> PathBuf {
+        write_executable(
+            dir,
+            "xclip",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncat >/dev/null\n",
+                shell_quote(log)
+            ),
+        )
+    }
+
+    fn shell_case_pattern(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    fn shell_quote_str(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 
     fn temp_dir() -> PathBuf {

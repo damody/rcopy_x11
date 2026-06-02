@@ -4,7 +4,7 @@ mod service;
 
 use anyhow::Result;
 use rcopy_core::AppConfig;
-use rcopy_integration::{WlClipboard, WtypePasteBackend};
+use rcopy_integration::{X11Clipboard, WtypePasteBackend};
 use rcopy_storage::Repository;
 use service::DaemonService;
 
@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
 
     let service = DaemonService::new(
         service_repo,
-        WlClipboard::new(),
+        X11Clipboard::new(),
         WtypePasteBackend::new(config.paste_command.clone()),
     );
     ipc::serve_default_socket(service).await
